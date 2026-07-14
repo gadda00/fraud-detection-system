@@ -21,7 +21,6 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 
 COPY --from=builder /out/fraud-detection-system /app/fraud-detection-system
-COPY --from=builder /src/deploy/rules.example.json /app/rules.json
 
 ENV PORT=8080 \
     ENVIRONMENT=production

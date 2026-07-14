@@ -60,11 +60,11 @@ jobs:
     name: Build Docker Image
     needs: [test, lint, security]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: false  # Re-enable when ready to push to a registry. The Dockerfile builds locally.
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build (no push — configure DOCKER_HUB secrets to enable push)
+      - name: Build (no push)
         uses: docker/build-push-action@v5
         with:
           context: .
