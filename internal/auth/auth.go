@@ -198,8 +198,8 @@ func ExtractBearer(header string) string {
 
 // Auth errors.
 var (
-	ErrNoToken      = errors.New("no bearer token provided")
-	ErrInvalidToken = errors.New("invalid token")
-	ErrExpired      = errors.New("token expired")
+	ErrNoToken       = errors.New("no bearer token provided")
+	ErrInvalidToken  = errors.New("invalid token")
+	ErrExpired       = errors.New("token expired")
 	ErrInvalidIssuer = errors.New("invalid token issuer")
 )

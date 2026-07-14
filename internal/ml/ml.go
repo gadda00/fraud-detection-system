@@ -113,7 +113,7 @@ type IsolationForest struct {
 
 // iTree is a single isolation tree.
 type iTree struct {
-	feature int   // 0 = amount, 1 = hour
+	feature int // 0 = amount, 1 = hour
 	split   float64
 	left    *iTree
 	right   *iTree

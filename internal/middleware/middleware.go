@@ -14,8 +14,8 @@ import (
 
 // Context keys for values attached by middleware.
 const (
-	ContextRequestID  = "request_id"
-	ContextPrincipal  = "principal"
+	ContextRequestID = "request_id"
+	ContextPrincipal = "principal"
 )
 
 // RequestID middleware attaches a UUID to every request, propagated via the

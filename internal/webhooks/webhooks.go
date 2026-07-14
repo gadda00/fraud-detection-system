@@ -54,7 +54,7 @@ func (s *SlackNotifier) Notify(ctx context.Context, tx models.Transaction, risk 
 	}
 
 	message := map[string]interface{}{
-		"username": "Fraud Sentinel",
+		"username":   "Fraud Sentinel",
 		"icon_emoji": ":rotating_light:",
 		"attachments": []map[string]interface{}{
 			{

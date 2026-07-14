@@ -24,12 +24,12 @@ import (
 type Status string
 
 const (
-	StatusOpen       Status = "open"       // Awaiting analyst review
-	StatusInReview   Status = "in_review"  // Analyst has picked it up
-	StatusConfirmed  Status = "confirmed"  // Analyst confirmed fraud
+	StatusOpen          Status = "open"           // Awaiting analyst review
+	StatusInReview      Status = "in_review"      // Analyst has picked it up
+	StatusConfirmed     Status = "confirmed"      // Analyst confirmed fraud
 	StatusFalsePositive Status = "false_positive" // Analyst cleared
-	StatusEscalated  Status = "escalated"  // Sent to senior analyst
-	StatusAutoResolved Status = "auto_resolved" // Closed by rule (e.g. block)
+	StatusEscalated     Status = "escalated"      // Sent to senior analyst
+	StatusAutoResolved  Status = "auto_resolved"  // Closed by rule (e.g. block)
 )
 
 // Priority is how urgently a case needs human attention.
@@ -44,26 +44,26 @@ const (
 
 // Case is the central artefact of the analyst workflow.
 type Case struct {
-	ID            string            `json:"id"`
-	TransactionID string            `json:"transaction_id"`
-	UserID        string            `json:"user_id"`
-	Amount        float64           `json:"amount"`
-	Currency      string            `json:"currency"`
-	Merchant      string            `json:"merchant"`
-	Category      string            `json:"category"`
-	Country       string            `json:"country"`
-	RiskScore     float64           `json:"risk_score"`
-	Severity      string            `json:"severity"`
-	Reasons       []string          `json:"reasons"`
-	Detectors     []string          `json:"detectors"`
-	RuleMatches   []string          `json:"rule_matches,omitempty"`
-	Status        Status            `json:"status"`
-	Priority      Priority          `json:"priority"`
-	AssignedTo    string            `json:"assigned_to,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	ResolvedAt    *time.Time        `json:"resolved_at,omitempty"`
-	Notes         []Note            `json:"notes,omitempty"`
+	ID            string     `json:"id"`
+	TransactionID string     `json:"transaction_id"`
+	UserID        string     `json:"user_id"`
+	Amount        float64    `json:"amount"`
+	Currency      string     `json:"currency"`
+	Merchant      string     `json:"merchant"`
+	Category      string     `json:"category"`
+	Country       string     `json:"country"`
+	RiskScore     float64    `json:"risk_score"`
+	Severity      string     `json:"severity"`
+	Reasons       []string   `json:"reasons"`
+	Detectors     []string   `json:"detectors"`
+	RuleMatches   []string   `json:"rule_matches,omitempty"`
+	Status        Status     `json:"status"`
+	Priority      Priority   `json:"priority"`
+	AssignedTo    string     `json:"assigned_to,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	ResolvedAt    *time.Time `json:"resolved_at,omitempty"`
+	Notes         []Note     `json:"notes,omitempty"`
 }
 
 // Note is an analyst comment on a case.
@@ -195,11 +195,11 @@ func (m *Manager) AddNote(id, author, text string) error {
 
 // Stats summarises the case queue.
 type Stats struct {
-	Total       int            `json:"total"`
-	ByStatus    map[Status]int `json:"by_status"`
-	ByPriority  map[Priority]int `json:"by_priority"`
-	ConfirmedFraud int         `json:"confirmed_fraud"`
-	FalsePositives int         `json:"false_positives"`
+	Total          int              `json:"total"`
+	ByStatus       map[Status]int   `json:"by_status"`
+	ByPriority     map[Priority]int `json:"by_priority"`
+	ConfirmedFraud int              `json:"confirmed_fraud"`
+	FalsePositives int              `json:"false_positives"`
 }
 
 // Stats returns aggregate counts for dashboards.

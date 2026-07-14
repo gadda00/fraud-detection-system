@@ -93,7 +93,7 @@ func TestExtractBearer(t *testing.T) {
 		in, out string
 	}{
 		{"Bearer abc123", "abc123"},
-		{"bearer abc", ""},  // case-sensitive prefix
+		{"bearer abc", ""}, // case-sensitive prefix
 		{"", ""},
 		{"Basic xyz", ""},
 	}
