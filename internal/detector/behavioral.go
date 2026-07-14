@@ -17,7 +17,6 @@ package detector
 
 import (
         "fmt"
-        "time"
 
         "github.com/gadda00/fraud-detection-system/internal/models"
         "github.com/gadda00/fraud-detection-system/internal/storage"
@@ -132,6 +131,3 @@ func isInWindow(hour, start, window int) bool {
         }
         return false
 }
-
-// utcHour returns the UTC hour of a time.Time (helper for tests).
-func utcHour(t time.Time) int { return t.UTC().Hour() }

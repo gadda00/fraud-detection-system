@@ -278,10 +278,6 @@ func validateTx(tx *models.Transaction) error {
         return nil
 }
 
-func withTimeout(d time.Duration) (context.Context, func()) {
-        return context.WithTimeout(context.Background(), d)
-}
-
 // ---------------------------------------------------------------------------
 // /api/health, /api/stats
 // ---------------------------------------------------------------------------
