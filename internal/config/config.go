@@ -20,6 +20,12 @@ type Config struct {
 	RedisAddr      string
 	PostgresDSN    string
 
+	// Kafka (optional).
+	KafkaBrokers       []string
+	KafkaInputTopic    string
+	KafkaOutputTopic   string
+	KafkaConsumerGroup string
+
 	// Auth.
 	APIKeySecret string
 	JWTSecret    string
@@ -29,11 +35,31 @@ type Config struct {
 	// Rules engine.
 	RulesPath string
 
-	// Webhooks.
+	// Webhooks / alerts.
 	SlackWebhookURL string
+
+	// Stripe (optional — for card blocking on confirmed fraud).
+	StripeAPIKey string
+
+	// Email (SMTP, optional).
+	SMTPHost       string
+	SMTPPort       string
+	SMTPUsername   string
+	SMTPPassword   string
+	AlertEmailFrom string
+	AlertEmailTo   string
+
+	// SMS (Twilio, optional).
+	TwilioAccountSID string
+	TwilioAuthToken  string
+	TwilioFromNumber string
+	AlertSMSTo       string
 
 	// Tracing.
 	OTLPEndpoint string
+
+	// Retraining pipeline.
+	RetrainInterval time.Duration
 
 	// HTTP server timeouts.
 	ReadTimeout  time.Duration
@@ -49,22 +75,69 @@ func Load() Config {
 	return Config{
 		Environment:        env("ENVIRONMENT", "development"),
 		Port:               env("PORT", "8080"),
-		Version:            env("VERSION", "2.0.0"),
+		Version:            env("VERSION", "2.1.0"),
 		StorageBackend:     env("STORAGE_BACKEND", "memory"),
 		RedisAddr:          env("REDIS_ADDR", "localhost:6379"),
 		PostgresDSN:        env("POSTGRES_DSN", ""),
+		KafkaBrokers:       envSlice("KAFKA_BROKERS"),
+		KafkaInputTopic:    env("KAFKA_INPUT_TOPIC", "transactions"),
+		KafkaOutputTopic:   env("KAFKA_OUTPUT_TOPIC", "fraud-alerts"),
+		KafkaConsumerGroup: env("KAFKA_CONSUMER_GROUP", "fraud-detection"),
 		APIKeySecret:       env("API_KEY_SECRET", ""),
 		JWTSecret:          env("JWT_SECRET", "change-me-in-production-32-bytes-min"),
 		JWTIssuer:          env("JWT_ISSUER", "fraud-detection-system"),
 		AuthRequired:       envBool("AUTH_REQUIRED", false),
 		RulesPath:          env("RULES_PATH", ""),
 		SlackWebhookURL:    env("SLACK_WEBHOOK_URL", ""),
+		StripeAPIKey:       env("STRIPE_API_KEY", ""),
+		SMTPHost:           env("SMTP_HOST", ""),
+		SMTPPort:           env("SMTP_PORT", "587"),
+		SMTPUsername:       env("SMTP_USERNAME", ""),
+		SMTPPassword:       env("SMTP_PASSWORD", ""),
+		AlertEmailFrom:     env("ALERT_EMAIL_FROM", ""),
+		AlertEmailTo:       env("ALERT_EMAIL_TO", ""),
+		TwilioAccountSID:   env("TWILIO_ACCOUNT_SID", ""),
+		TwilioAuthToken:    env("TWILIO_AUTH_TOKEN", ""),
+		TwilioFromNumber:   env("TWILIO_FROM_NUMBER", ""),
+		AlertSMSTo:         env("ALERT_SMS_TO", ""),
 		OTLPEndpoint:       env("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		RetrainInterval:    envDuration("RETRAIN_INTERVAL", 24*time.Hour),
 		ReadTimeout:        envDuration("READ_TIMEOUT", 10*time.Second),
 		WriteTimeout:       envDuration("WRITE_TIMEOUT", 10*time.Second),
 		IdleTimeout:        envDuration("IDLE_TIMEOUT", 60*time.Second),
 		RateLimitPerSecond: envInt("RATE_LIMIT_PER_SECOND", 1000),
 	}
+}
+
+func envSlice(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	out := []string{}
+	for _, s := range splitComma(v) {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func splitComma(s string) []string {
+	var out []string
+	cur := ""
+	for _, r := range s {
+		if r == ',' {
+			out = append(out, cur)
+			cur = ""
+		} else {
+			cur += string(r)
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
 }
 
 func env(key, def string) string {

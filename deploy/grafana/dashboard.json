@@ -1,0 +1,133 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "red", "value": 80}]}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showThresholdLabels": false, "showThresholdMarkers": true},
+      "pluginVersion": "10.0.0",
+      "targets": [{"expr": "rate(fraud_scoring_total[5m])", "legendFormat": "{{severity}}", "refId": "A"}],
+      "title": "Scoring Rate by Severity (req/sec)",
+      "type": "gauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"axisLabel": "", "axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(fraud_scoring_total[5m])) by (severity)", "legendFormat": "{{severity}}", "refId": "A"}],
+      "title": "Transactions Scored Over Time (by severity)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "blue"}, {"color": "yellow", "value": 100}, {"color": "red", "value": 1000}]}, "unit": "µs"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "pluginVersion": "10.0.0",
+      "targets": [{"expr": "histogram_quantile(0.99, rate(fraud_scoring_latency_microseconds_bucket[5m]))", "legendFormat": "p99 latency", "refId": "A"}],
+      "title": "p99 Scoring Latency",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"axisLabel": "", "axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 10, "gradientMode": "opacity", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]}, "unit": "µs"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 8},
+      "id": 4,
+      "options": {"legend": {"calcs": ["mean", "max", "p99"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, rate(fraud_scoring_latency_microseconds_bucket[5m]))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.90, rate(fraud_scoring_latency_microseconds_bucket[5m]))", "legendFormat": "p90", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, rate(fraud_scoring_latency_microseconds_bucket[5m]))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "title": "Scoring Latency Percentiles (µs)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "red", "mode": "fixed"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]}, "unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "pluginVersion": "10.0.0",
+      "targets": [{"expr": "sum(rate(fraud_scoring_total{flagged=\"true\"}[5m])) / sum(rate(fraud_scoring_total[5m])) * 100", "legendFormat": "flag rate %", "refId": "A"}],
+      "title": "Flag Rate (%)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"axisLabel": "", "axisPlacement": "auto", "drawStyle": "bars", "fillOpacity": 80, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "normal"}, "thresholdsStyle": {"mode": "off"}}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 16},
+      "id": 6,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(fraud_scoring_total[5m])) by (severity, flagged)", "legendFormat": "{{severity}} / flagged={{flagged}}", "refId": "A"}],
+      "title": "Flagged vs Cleared (stacked, by severity)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"axisLabel": "", "axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 7,
+      "options": {"legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(fraud_http_requests_total[5m])) by (path)", "legendFormat": "{{path}}", "refId": "A"}],
+      "title": "HTTP Requests by Path (req/sec)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"axisLabel": "", "axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 8,
+      "options": {"legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [{"expr": "histogram_quantile(0.99, rate(fraud_http_request_duration_seconds_bucket[5m])) by (path)", "legendFormat": "{{path}} p99", "refId": "A"}],
+      "title": "HTTP p99 Latency by Path (seconds)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+      "id": 9,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "pluginVersion": "10.0.0",
+      "targets": [{"expr": "sum(rate(fraud_http_requests_total{status=~\"4..|5..\"}[5m])) by (status)", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "HTTP Error Rate by Status Code (req/sec)",
+      "type": "stat"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["fraud-detection", "go", "fintech"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Fraud Detection System — Overview",
+  "uid": "fraud-detection-overview",
+  "version": 1,
+  "weekStart": ""
+}

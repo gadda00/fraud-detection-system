@@ -35,11 +35,14 @@ import (
 	"github.com/gadda00/fraud-detection-system/internal/cases"
 	"github.com/gadda00/fraud-detection-system/internal/config"
 	"github.com/gadda00/fraud-detection-system/internal/detector"
+	"github.com/gadda00/fraud-detection-system/internal/integrations"
+	"github.com/gadda00/fraud-detection-system/internal/kafka"
 	"github.com/gadda00/fraud-detection-system/internal/ml"
 	"github.com/gadda00/fraud-detection-system/internal/models"
 	"github.com/gadda00/fraud-detection-system/internal/observability"
 	"github.com/gadda00/fraud-detection-system/internal/rules"
 	"github.com/gadda00/fraud-detection-system/internal/storage"
+	"github.com/gadda00/fraud-detection-system/internal/training"
 	"github.com/gadda00/fraud-detection-system/internal/webhooks"
 )
 
@@ -104,9 +107,31 @@ func main() {
 		log.Info().Str("path", cfg.RulesPath).Msg("rules engine loaded")
 	}
 
-	// 6. Case manager + webhook notifier.
+	// 6. Case manager + multi-channel notifier (Slack + Email + SMS).
 	caseMgr := cases.NewManager()
-	notifier := webhooks.NewSlackNotifier(cfg.SlackWebhookURL)
+	slackNotifier := webhooks.NewSlackNotifier(cfg.SlackWebhookURL)
+	emailNotifier := integrations.NewEmailNotifier()
+	smsNotifier := integrations.NewSMSNotifier()
+	multiNotifier := integrations.NewMultiNotifier(
+		slackNotifier.Notify,
+		emailNotifier.Notify,
+		smsNotifier.Notify,
+	)
+
+	// 6b. Stripe integration (optional — auto-block card on confirmed fraud).
+	stripeClient := integrations.NewStripeClient(cfg.StripeAPIKey)
+
+	// 6c. Retraining pipeline (nightly calibrator refresh on analyst labels).
+	retrainPipeline := training.NewPipeline(
+		calibrator,
+		detector.NewEnsembleDetector(store), // fresh ensemble bound to the live store
+		store,
+		caseMgr,
+		cfg.RetrainInterval,
+	)
+	retrainCtx, retrainCancel := context.WithCancel(context.Background())
+	defer retrainCancel()
+	retrainPipeline.Start(retrainCtx)
 
 	// 7. Auth verifiers.
 	var verifier auth.Verifier
@@ -126,10 +151,31 @@ func main() {
 
 	// 8. HTTP server.
 	gin.SetMode(gin.ReleaseMode)
+	// Wrap the multiNotifier so it satisfies the webhooks.Notifier interface.
+	var notifier webhooks.Notifier = &multiNotifierAdapter{m: multiNotifier}
 	server := api.NewServer(store, rulesEngine, caseMgr, calibrator, notifier)
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 	server.Register(router, verifier, cfg.AuthRequired)
+
+	// 8b. Kafka consumer (optional — starts if KAFKA_BROKERS is set).
+	var kafkaConsumer *kafka.Consumer
+	if len(cfg.KafkaBrokers) > 0 {
+		kafkaConsumer = kafka.NewConsumer(
+			kafka.Config{
+				Brokers:       cfg.KafkaBrokers,
+				InputTopic:    cfg.KafkaInputTopic,
+				OutputTopic:   cfg.KafkaOutputTopic,
+				ConsumerGroup: cfg.KafkaConsumerGroup,
+			},
+			store,
+			detector.NewEnsembleDetector(store),
+			notifier,
+		)
+		kafkaCtx, kafkaCancel := context.WithCancel(context.Background())
+		defer kafkaCancel()
+		kafkaConsumer.Start(kafkaCtx)
+	}
 
 	httpSrv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -152,12 +198,29 @@ func main() {
 	sig := <-quit
 	log.Info().Str("signal", sig.String()).Msg("shutting down")
 
+	if kafkaConsumer != nil {
+		if err := kafkaConsumer.Close(); err != nil {
+			log.Error().Err(err).Msg("kafka consumer close failed")
+		}
+	}
+	_ = stripeClient // available for future case-confirmed callbacks
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		log.Error().Err(err).Msg("graceful shutdown failed")
 	}
 	log.Info().Msg("bye")
+}
+
+// multiNotifierAdapter wraps an integrations.MultiNotifier so it satisfies
+// the webhooks.Notifier interface.
+type multiNotifierAdapter struct {
+	m *integrations.MultiNotifier
+}
+
+func (a *multiNotifierAdapter) Notify(ctx context.Context, tx models.Transaction, risk models.RiskScore) error {
+	return a.m.Notify(ctx, tx, risk)
 }
 
 // buildCalibrationPairs runs the ensemble over the labelled data and
