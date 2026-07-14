@@ -98,7 +98,7 @@ func (p *PostgresStore) Add(ctx context.Context, tx models.Transaction, score mo
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer dbTx.Rollback(ctx) // safe to call after commit
+	defer func() { _ = dbTx.Rollback(ctx) }() // safe to call after commit
 
 	if _, err := dbTx.Exec(ctx,
 		"INSERT INTO transactions (id, user_id, amount, currency, merchant, category, country, device_id, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -176,12 +176,9 @@ func (p *PostgresStore) GetUserHistory(ctx context.Context, userID string) ([]mo
 // separate users table or a materialized view).
 func (p *PostgresStore) GetStats(ctx context.Context) (Stats, error) {
 	var total, flagged int
-	if err := p.pool.QueryRow(ctx, "SELECT int_value FROM fraud_stats WHERE key = 'total_scored'").Scan(&total); err != nil && err.Error() != "no rows in result set" {
-		// tolerate missing row (cold start)
-	}
-	if err := p.pool.QueryRow(ctx, "SELECT int_value FROM fraud_stats WHERE key = 'total_flagged'").Scan(&flagged); err != nil && err.Error() != "no rows in result set" {
-		// tolerate missing row
-	}
+	// tolerate missing rows (cold start) — pgx returns ErrNoRows
+	_ = p.pool.QueryRow(ctx, "SELECT int_value FROM fraud_stats WHERE key = 'total_scored'").Scan(&total)
+	_ = p.pool.QueryRow(ctx, "SELECT int_value FROM fraud_stats WHERE key = 'total_flagged'").Scan(&flagged)
 
 	var users int
 	_ = p.pool.QueryRow(ctx, "SELECT COUNT(DISTINCT user_id) FROM transactions").Scan(&users)
