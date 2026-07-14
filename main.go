@@ -3,93 +3,175 @@
 //
 // On boot it:
 //
-//  1. Builds an in-memory store and seeds it with a realistic, labelled
-//     dataset (1000 transactions, 50 users, 5% fraud).
-//  2. Runs an offline evaluation of the ensemble detector over that
-//     dataset and logs the recall / precision / FPR — a built-in smoke
-//     test that the detectors actually work.
-//  3. Starts a Gin HTTP server on :8080 exposing /api/score, /api/health
-//     and /api/stats.
-//  4. Shuts down gracefully on SIGINT / SIGTERM.
+//  1. Loads configuration from environment variables.
+//  2. Initialises structured logging + OpenTelemetry tracing.
+//  3. Builds the storage backend (in-memory by default; Redis or Postgres
+//     when configured).
+//  4. Seeds the store with a realistic, labelled dataset (1000 transactions,
+//     50 users, 5% fraud).
+//  5. Runs an offline evaluation of the ensemble detector and logs the
+//     recall / precision / FPR.
+//  6. Fits the logistic calibrator on the labelled data.
+//  7. Loads the rules engine (if RULES_PATH is set).
+//  8. Builds the case manager, webhook notifier, and auth verifiers.
+//  9. Starts a Gin HTTP server on :8080 exposing the full API surface.
+//  10. Shuts down gracefully on SIGINT / SIGTERM.
 package main
 
 import (
-	"context"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+        "context"
+        "fmt"
+        "net/http"
+        "os"
+        "os/signal"
+        "syscall"
+        "time"
 
-	"github.com/gin-gonic/gin"
+        "github.com/gin-gonic/gin"
+        "github.com/rs/zerolog/log"
 
-	"github.com/gadda00/fraud-detection-system/internal/api"
-	"github.com/gadda00/fraud-detection-system/internal/detector"
-	"github.com/gadda00/fraud-detection-system/internal/storage"
+        "github.com/gadda00/fraud-detection-system/internal/api"
+        "github.com/gadda00/fraud-detection-system/internal/auth"
+        "github.com/gadda00/fraud-detection-system/internal/cases"
+        "github.com/gadda00/fraud-detection-system/internal/config"
+        "github.com/gadda00/fraud-detection-system/internal/detector"
+        "github.com/gadda00/fraud-detection-system/internal/ml"
+        "github.com/gadda00/fraud-detection-system/internal/models"
+        "github.com/gadda00/fraud-detection-system/internal/observability"
+        "github.com/gadda00/fraud-detection-system/internal/rules"
+        "github.com/gadda00/fraud-detection-system/internal/storage"
+        "github.com/gadda00/fraud-detection-system/internal/webhooks"
 )
 
 func main() {
-	// Release mode keeps Gin's startup noise out of production logs.
-	gin.SetMode(gin.ReleaseMode)
+        cfg := config.Load()
 
-	// ---------------------------------------------------------------
-	// 1. Build & seed the in-memory store.
-	// ---------------------------------------------------------------
-	store := storage.New()
-	data := api.GenerateSeedData()
-	loaded := api.SeedStore(store, data)
-	log.Printf("seeded %d transactions across %d users (%d labelled fraud)",
-		loaded, store.UserCount(), len(data.FraudIDs))
+        // 1. Logging + tracing.
+        shutdown, err := observability.Init("fraud-detection-system", cfg.Version, cfg.Environment)
+        if err != nil {
+                fmt.Fprintf(os.Stderr, "observability init: %v\n", err)
+                os.Exit(1)
+        }
+        defer func() {
+                ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+                defer cancel()
+                _ = shutdown(ctx)
+        }()
 
-	// ---------------------------------------------------------------
-	// 2. Offline evaluation (no leakage: each tx scored against the
-	//    history that preceded it). Logged once at boot so a glance at
-	//    the logs confirms the detectors are healthy.
-	// ---------------------------------------------------------------
-	evalStore := storage.New()
-	evalEnsemble := detector.NewEnsembleDetector(evalStore)
-	m := api.Evaluate(evalEnsemble, evalStore, data)
-	log.Printf("offline evaluation: total=%d fraud=%d normal=%d | TP=%d FP=%d FN=%d TN=%d | recall=%.3f precision=%.3f f1=%.3f fpr=%.4f",
-		m.Total, m.Fraud, m.Normal,
-		m.TruePos, m.FalsePos, m.FalseNeg, m.TrueNeg,
-		m.Recall, m.Precision, m.F1, m.FPR)
+        log.Info().
+                Str("env", cfg.Environment).
+                Str("version", cfg.Version).
+                Str("storage", cfg.StorageBackend).
+                Msg("starting fraud-detection-system")
 
-	// ---------------------------------------------------------------
-	// 3. HTTP server.
-	// ---------------------------------------------------------------
-	server := api.NewServer(store)
-	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
-	server.Register(router)
+        // 2. Build & seed the store.
+        store := storage.New()
+        data := api.GenerateSeedData()
+        loaded := api.SeedStore(store, data)
+        log.Info().
+                Int("transactions", loaded).
+                Int("users", store.UserCount()).
+                Int("fraud", len(data.FraudIDs)).
+                Msg("seeded dataset")
 
-	httpSrv := &http.Server{
-		Addr:         ":8080",
-		Handler:      router,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+        // 3. Offline evaluation.
+        evalStore := storage.New()
+        evalEnsemble := detector.NewEnsembleDetector(evalStore)
+        m := api.Evaluate(evalEnsemble, evalStore, data)
+        log.Info().
+                Int("total", m.Total).
+                Int("fraud", m.Fraud).
+                Int("tp", m.TruePos).Int("fp", m.FalsePos).
+                Int("fn", m.FalseNeg).Int("tn", m.TrueNeg).
+                Float64("recall", m.Recall).
+                Float64("precision", m.Precision).
+                Float64("f1", m.F1).
+                Float64("fpr", m.FPR).
+                Msg("offline evaluation")
 
-	go func() {
-		log.Printf("fraud-detection-system %s listening on :8080", api.Version)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server failed: %v", err)
-		}
-	}()
+        // 4. Fit the logistic calibrator on the labelled data.
+        calibrator := ml.NewLogisticCalibrator()
+        calPairs := buildCalibrationPairs(evalEnsemble, evalStore, data)
+        calibrator.Fit(calPairs, 500, 0.1)
+        a, b := calibrator.Coefficients()
+        log.Info().Float64("a", a).Float64("b", b).Msg("calibrator fitted")
 
-	// ---------------------------------------------------------------
-	// 4. Graceful shutdown.
-	// ---------------------------------------------------------------
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-quit
-	log.Printf("received %s, shutting down...", sig)
+        // 5. Rules engine (optional).
+        rulesEngine, err := rules.NewEngine(cfg.RulesPath)
+        if err != nil {
+                log.Error().Err(err).Str("path", cfg.RulesPath).Msg("rules engine load failed")
+        } else if len(rulesEngine.Evaluate(models.Transaction{})) == 0 && cfg.RulesPath != "" {
+                log.Info().Str("path", cfg.RulesPath).Msg("rules engine loaded")
+        }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := httpSrv.Shutdown(ctx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
-	}
-	log.Printf("bye")
+        // 6. Case manager + webhook notifier.
+        caseMgr := cases.NewManager()
+        notifier := webhooks.NewSlackNotifier(cfg.SlackWebhookURL)
+
+        // 7. Auth verifiers.
+        var verifier auth.Verifier
+        if cfg.APIKeySecret != "" || cfg.JWTSecret != "" {
+                verifiers := []auth.Verifier{}
+                if cfg.APIKeySecret != "" {
+                        verifiers = append(verifiers, auth.NewAPIKeyVerifier(cfg.APIKeySecret))
+                }
+                if cfg.JWTSecret != "" {
+                        verifiers = append(verifiers, auth.NewJWTVerifier(cfg.JWTSecret, cfg.JWTIssuer))
+                }
+                verifier = auth.NewMultiVerifier(verifiers...)
+        } else {
+                log.Warn().Msg("AUTH_REQUIRED is false and no API key / JWT secret is set — running unauthenticated (dev mode)")
+                verifier = auth.NewAPIKeyVerifier("") // always rejects — but AuthRequired=false lets requests through
+        }
+
+        // 8. HTTP server.
+        gin.SetMode(gin.ReleaseMode)
+        server := api.NewServer(store, rulesEngine, caseMgr, calibrator, notifier)
+        router := gin.New()
+        router.Use(gin.Logger(), gin.Recovery())
+        server.Register(router, verifier, cfg.AuthRequired)
+
+        httpSrv := &http.Server{
+                Addr:         ":" + cfg.Port,
+                Handler:      router,
+                ReadTimeout:  cfg.ReadTimeout,
+                WriteTimeout: cfg.WriteTimeout,
+                IdleTimeout:  cfg.IdleTimeout,
+        }
+
+        go func() {
+                log.Info().Str("port", cfg.Port).Msg("listening")
+                if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+                        log.Fatal().Err(err).Msg("http server failed")
+                }
+        }()
+
+        // 9. Graceful shutdown.
+        quit := make(chan os.Signal, 1)
+        signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+        sig := <-quit
+        log.Info().Str("signal", sig.String()).Msg("shutting down")
+
+        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+        defer cancel()
+        if err := httpSrv.Shutdown(ctx); err != nil {
+                log.Error().Err(err).Msg("graceful shutdown failed")
+        }
+        log.Info().Msg("bye")
+}
+
+// buildCalibrationPairs runs the ensemble over the labelled data and
+// collects (raw_score, label) pairs for fitting the calibrator. We use a
+// fresh store so we don't pollute the main store's history.
+func buildCalibrationPairs(ensemble *detector.EnsembleDetector, store *storage.Store, data api.SeedData) []ml.LabelledPair {
+        pairs := make([]ml.LabelledPair, 0, len(data.Transactions))
+        for _, tx := range data.Transactions {
+                rs := ensemble.Score(tx)
+                pairs = append(pairs, ml.LabelledPair{
+                        Score: rs.Score,
+                        Label: data.IsFraud(tx.ID),
+                })
+                store.Seed(tx)
+        }
+        return pairs
 }

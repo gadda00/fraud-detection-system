@@ -1,21 +1,36 @@
 # Binaries
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
 fraud-detection-system
 
-# Environment / secrets
-.env
-.env.*
+# Test artifacts
+*.txt
+coverage.txt
+*.out
+*.prof
 
-# Editor / OS cruft
-.DS_Store
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
-# Test / coverage artifacts
-*.out
-coverage.txt
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+*.env
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
