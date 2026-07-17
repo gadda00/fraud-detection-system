@@ -43,7 +43,7 @@ jobs:
         run: go mod download
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.59
+          version: v1.62
           args: --timeout=5m
 
   security:
