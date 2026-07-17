@@ -12,6 +12,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"strings"
@@ -92,7 +93,14 @@ func (v *JWTVerifier) Verify(token string) (*Principal, error) {
 		return nil, ErrExpired
 	}
 	sub, _ := claims.GetSubject()
-	role := Role(claims["role"].(string))
+	// Guard against malformed JWTs: a missing or non-string "role" claim
+	// used to panic with a type-assertion fault, taking the whole request
+	// down. Treat it as an invalid token instead.
+	roleStr, ok := claims["role"].(string)
+	if !ok || roleStr == "" {
+		return nil, ErrInvalidToken
+	}
+	role := Role(roleStr)
 	tenant, _ := claims["tenant_id"].(string)
 	return &Principal{
 		ID:       sub,
@@ -117,7 +125,12 @@ func (v *APIKeyVerifier) Verify(token string) (*Principal, error) {
 	if token == "" {
 		return nil, ErrNoToken
 	}
-	if token != v.key {
+	// Constant-time comparison guards the API key against timing side
+	// channels. The empty-key check happens *before* the comparison so a
+	// misconfigured verifier (no key set) cannot be brute-forced into
+	// accepting an empty token — subtle.ConstantTimeCompare returns 1 for
+	// two empty byte slices, which is exactly the footgun we want to avoid.
+	if v.key == "" || subtle.ConstantTimeCompare([]byte(token), []byte(v.key)) != 1 {
 		return nil, ErrInvalidToken
 	}
 	return &Principal{

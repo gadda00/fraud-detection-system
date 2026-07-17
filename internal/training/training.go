@@ -38,7 +38,7 @@ type Pipeline struct {
 	mu          sync.Mutex
 	calibrator  *ml.LogisticCalibrator
 	ensemble    *detector.EnsembleDetector
-	store       *storage.Store
+	store       storage.Store
 	caseManager *cases.Manager
 	schedule    time.Duration
 }
@@ -50,7 +50,7 @@ type Pipeline struct {
 func NewPipeline(
 	calibrator *ml.LogisticCalibrator,
 	ensemble *detector.EnsembleDetector,
-	store *storage.Store,
+	store storage.Store,
 	caseManager *cases.Manager,
 	schedule time.Duration,
 ) *Pipeline {

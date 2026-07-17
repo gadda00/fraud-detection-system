@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -313,9 +314,10 @@ func generateVelocityFraud(users []userProfile, count int, rng *rand.Rand, now t
 // SeedStore loads every transaction in data into store's history via the
 // non-scoring Seed method, so /api/stats is not polluted by 1000 fake
 // "scored" events. Returns the number of transactions loaded.
-func SeedStore(store *storage.Store, data SeedData) int {
+func SeedStore(store storage.Store, data SeedData) int {
+	ctx := context.Background()
 	for _, tx := range data.Transactions {
-		store.Seed(tx)
+		_ = store.Seed(ctx, tx)
 	}
 	return len(data.Transactions)
 }
@@ -348,7 +350,8 @@ type EvalMetrics struct {
 //
 // This is the same regime a live system operates under, which makes the
 // metrics a fair predictor of production behaviour.
-func Evaluate(d detector.Detector, store *storage.Store, data SeedData) EvalMetrics {
+func Evaluate(d detector.Detector, store storage.Store, data SeedData) EvalMetrics {
+	ctx := context.Background()
 	// data.Transactions is already sorted chronologically by GenerateSeedData.
 	m := EvalMetrics{}
 	for _, tx := range data.Transactions {
@@ -370,7 +373,7 @@ func Evaluate(d detector.Detector, store *storage.Store, data SeedData) EvalMetr
 
 		// Add to baseline AFTER scoring so the current tx is never in
 		// its own history.
-		store.Seed(tx)
+		_ = store.Seed(ctx, tx)
 	}
 
 	m.Fraud = m.TruePos + m.FalseNeg

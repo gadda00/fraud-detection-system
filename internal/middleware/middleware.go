@@ -36,6 +36,12 @@ func RequestID() gin.HandlerFunc {
 // Auth middleware verifies the bearer token and attaches the Principal to
 // the context. If requireAuth is false, missing tokens are allowed through
 // (useful for health checks).
+//
+// In dev mode (requireAuth=false) a request that arrives with NO bearer
+// token is assigned a synthetic dev/admin Principal. Without this, any
+// downstream RequireRole gate would 401 because the context never had a
+// Principal attached — which made the dev-mode API surface effectively
+// unusable for any route protected by RequireRole.
 func Auth(verifier auth.Verifier, requireAuth bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := auth.ExtractBearer(c.GetHeader("Authorization"))
@@ -44,6 +50,12 @@ func Auth(verifier auth.Verifier, requireAuth bool) gin.HandlerFunc {
 				c.AbortWithStatusJSON(401, gin.H{"error": "missing bearer token"})
 				return
 			}
+			// Dev mode with no token: attach a synthetic admin principal so
+			// that downstream RequireRole gates pass. This is intentionally
+			// only the no-token path — a presented-but-invalid token still
+			// gets no principal (a malformed credential is a smell, not a
+			// dev convenience).
+			c.Set(ContextPrincipal, &auth.Principal{ID: "dev", Role: auth.RoleAdmin})
 			c.Next()
 			return
 		}

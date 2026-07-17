@@ -16,6 +16,7 @@
 package detector
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/gadda00/fraud-detection-system/internal/models"
@@ -25,11 +26,11 @@ import (
 // BehavioralAnomalyDetector flags transactions outside the user's typical
 // behavioural envelope (time-of-day, day-of-week).
 type BehavioralAnomalyDetector struct {
-	store *storage.Store
+	store storage.Store
 }
 
 // NewBehavioralAnomalyDetector builds a detector with default parameters.
-func NewBehavioralAnomalyDetector(store *storage.Store) *BehavioralAnomalyDetector {
+func NewBehavioralAnomalyDetector(store storage.Store) *BehavioralAnomalyDetector {
 	return &BehavioralAnomalyDetector{store: store}
 }
 
@@ -38,7 +39,7 @@ func (d *BehavioralAnomalyDetector) Name() string { return "behavioral_anomaly" 
 
 // Score implements Detector.
 func (d *BehavioralAnomalyDetector) Score(tx models.Transaction) models.RiskScore {
-	hist := d.store.GetUserHistory(tx.UserID)
+	hist, _ := d.store.GetUserHistory(context.Background(), tx.UserID)
 	if len(hist) < 5 {
 		// Need at least a week of history to build a behavioural profile.
 		return clean()

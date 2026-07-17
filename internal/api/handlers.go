@@ -3,7 +3,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -14,44 +13,67 @@ import (
 	"github.com/gadda00/fraud-detection-system/internal/middleware"
 	"github.com/gadda00/fraud-detection-system/internal/ml"
 	"github.com/gadda00/fraud-detection-system/internal/models"
+	"github.com/gadda00/fraud-detection-system/internal/pipeline"
 	"github.com/gadda00/fraud-detection-system/internal/rules"
 	"github.com/gadda00/fraud-detection-system/internal/storage"
 	"github.com/gadda00/fraud-detection-system/internal/webhooks"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/rs/zerolog/log"
 )
 
 // Version is the semantic version reported by /api/health.
-const Version = "2.0.0"
+const Version = "2.1.0"
 
 // Server bundles every dependency a handler needs. Constructing it once at
 // startup and sharing it across requests keeps allocation low.
+//
+// Since Phase 1 the actual scoring logic lives in Server.Pipeline
+// (internal/pipeline.Pipeline.Process); the handlers are thin adapters
+// that decode the request, call Pipeline.Process, and shape the Result
+// into the HTTP JSON envelope. The Store / Ensemble / Calibrator /
+// CaseManager / Notifier fields are retained on the Server for the
+// introspection endpoints (Health, Stats) and to keep api.NewServer's
+// signature stable for callers (main.go).
 type Server struct {
-	Store       *storage.Store
+	Store       storage.Store
 	Ensemble    *detector.EnsembleDetector
 	RulesEngine *rules.Engine
 	CaseManager *cases.Manager
 	Calibrator  *ml.LogisticCalibrator
 	Notifier    webhooks.Notifier
+	Pipeline    *pipeline.Pipeline
 	Started     time.Time
+
+	// RateLimitPerSecond caps requests per client IP per second via a
+	// token-bucket middleware. <= 0 disables rate limiting.
+	RateLimitPerSecond int
 }
 
 // NewServer wires a Server around the given store with all subsystems.
 func NewServer(
-	store *storage.Store,
+	store storage.Store,
 	rulesEngine *rules.Engine,
 	caseMgr *cases.Manager,
 	calibrator *ml.LogisticCalibrator,
 	notifier webhooks.Notifier,
 ) *Server {
+	ens := detector.NewEnsembleDetector(store)
+	pipe := &pipeline.Pipeline{
+		Ensemble:    ens,
+		Rules:       rulesEngine,
+		Calibrator:  calibrator,
+		Store:       store,
+		CaseManager: caseMgr,
+		Notifier:    notifier,
+	}
 	return &Server{
 		Store:       store,
-		Ensemble:    detector.NewEnsembleDetector(store),
+		Ensemble:    ens,
 		RulesEngine: rulesEngine,
 		CaseManager: caseMgr,
 		Calibrator:  calibrator,
 		Notifier:    notifier,
+		Pipeline:    pipe,
 		Started:     time.Now(),
 	}
 }
@@ -76,6 +98,10 @@ func (s *Server) Register(r *gin.Engine, verifier auth.Verifier, authRequired bo
 	api := r.Group("/api")
 	api.Use(middleware.RequestID())
 	api.Use(middleware.Prometheus())
+	// Per-IP rate limit. A configured RateLimitPerSecond <= 0 makes the
+	// middleware a no-op, so this stays safe even when the operator
+	// hasn't set the env var.
+	api.Use(middleware.RateLimit(s.RateLimitPerSecond))
 	api.Use(middleware.Auth(verifier, authRequired))
 
 	// Public-ish endpoints.
@@ -138,10 +164,11 @@ type scoreResponse struct {
 	LatencyUS      int64             `json:"latency_us"`
 }
 
-// ScoreTransaction is the main entry point.
+// ScoreTransaction is the main entry point. It is a thin adapter:
+// decode → validate → Pipeline.Process → shape Result into the JSON
+// envelope. All scoring logic lives in the pipeline so HTTP and Kafka
+// agree on what a "scored transaction" means (Finding 3.11).
 func (s *Server) ScoreTransaction(c *gin.Context) {
-	start := time.Now()
-
 	var tx models.Transaction
 	if err := c.ShouldBindJSON(&tx); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON: " + err.Error()})
@@ -152,74 +179,38 @@ func (s *Server) ScoreTransaction(c *gin.Context) {
 		return
 	}
 
-	// 1. Run the statistical ensemble.
-	risk := s.Ensemble.Score(tx)
-
-	// 2. Calibrate the raw score to a probability.
-	calibrated := s.Calibrator.Calibrate(risk.Score)
-
-	// 3. Evaluate deterministic rules.
-	var ruleMatches []rules.RuleMatch
-	if s.RulesEngine != nil {
-		ruleMatches = s.RulesEngine.Evaluate(tx)
-	}
-	blocked := rules.HasBlock(ruleMatches)
-	reviewRequired := rules.HasReview(ruleMatches)
-
-	// 4. If blocked or high-severity, override the score to 1.0.
-	if blocked || risk.Severity == models.SeverityCritical {
-		risk.Score = 1.0
-		risk.Severity = models.SeverityCritical
+	res, err := s.Pipeline.Process(c.Request.Context(), tx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "scoring failed: " + err.Error()})
+		return
 	}
 
-	// 5. Persist the transaction + score.
-	s.Store.Add(tx, risk)
+	// Record Prometheus metrics for the scoring latency / severity.
+	middleware.RecordScoring(res.Risk.Severity, res.Risk.IsFlagged(), float64(res.LatencyUS))
 
-	// 6. Create a case if flagged or review-required.
-	var caseID string
-	if risk.IsFlagged() || reviewRequired || blocked {
-		var ruleIDs []string
-		for _, m := range ruleMatches {
-			ruleIDs = append(ruleIDs, m.Rule.ID)
-		}
-		caseID = s.CaseManager.Create(tx, risk, ruleIDs)
-	}
-
-	// 7. Fire webhook (async — don't block the response).
-	if risk.IsFlagged() {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.Notifier.Notify(ctx, tx, risk); err != nil {
-				log.Error().Err(err).Str("tx_id", tx.ID).Msg("webhook notify failed")
-			}
-		}()
-	}
-
-	// 8. Record Prometheus metrics.
-	latencyUS := time.Since(start).Microseconds()
-	middleware.RecordScoring(risk.Severity, risk.IsFlagged(), float64(latencyUS))
-
-	resp := scoreResponse{
+	c.JSON(http.StatusOK, scoreResponse{
 		TransactionID:  tx.ID,
 		UserID:         tx.UserID,
 		Amount:         tx.Amount,
 		Currency:       tx.Currency,
-		Flagged:        risk.IsFlagged(),
-		Blocked:        blocked,
-		ReviewRequired: reviewRequired,
-		Risk:           risk,
-		CalibratedP:    calibrated,
-		RuleMatches:    ruleMatches,
-		CaseID:         caseID,
+		Flagged:        res.Risk.IsFlagged(),
+		Blocked:        res.Blocked,
+		ReviewRequired: res.ReviewRequired,
+		Risk:           res.Risk,
+		CalibratedP:    res.Calibrated,
+		RuleMatches:    res.RuleMatches,
+		CaseID:         res.CaseID,
 		ScoredAt:       time.Now().UTC(),
-		LatencyUS:      latencyUS,
-	}
-	c.JSON(http.StatusOK, resp)
+		LatencyUS:      res.LatencyUS,
+	})
 }
 
 // ScoreBatch scores a batch of transactions (for high-throughput ingestion).
-// Limited to 1000 transactions per request.
+// Limited to 1000 transactions per request. Each transaction goes through
+// Pipeline.Process individually so the batch path inherits the same
+// idempotency, FlagWeight blend, case creation and notification semantics
+// as the single-score path — the only difference is that the JSON
+// envelope is collected into a slice rather than returned alone.
 func (s *Server) ScoreBatch(c *gin.Context) {
 	var batch []models.Transaction
 	if err := c.ShouldBindJSON(&batch); err != nil {
@@ -231,27 +222,31 @@ func (s *Server) ScoreBatch(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	results := make([]scoreResponse, 0, len(batch))
 	for _, tx := range batch {
 		if err := validateTx(&tx); err != nil {
 			continue
 		}
-		start := time.Now()
-		risk := s.Ensemble.Score(tx)
-		calibrated := s.Calibrator.Calibrate(risk.Score)
-		s.Store.Add(tx, risk)
-		latencyUS := time.Since(start).Microseconds()
-		middleware.RecordScoring(risk.Severity, risk.IsFlagged(), float64(latencyUS))
+		res, err := s.Pipeline.Process(ctx, tx)
+		if err != nil {
+			continue
+		}
+		middleware.RecordScoring(res.Risk.Severity, res.Risk.IsFlagged(), float64(res.LatencyUS))
 		results = append(results, scoreResponse{
-			TransactionID: tx.ID,
-			UserID:        tx.UserID,
-			Amount:        tx.Amount,
-			Currency:      tx.Currency,
-			Flagged:       risk.IsFlagged(),
-			Risk:          risk,
-			CalibratedP:   calibrated,
-			ScoredAt:      time.Now().UTC(),
-			LatencyUS:     latencyUS,
+			TransactionID:  tx.ID,
+			UserID:         tx.UserID,
+			Amount:         tx.Amount,
+			Currency:       tx.Currency,
+			Flagged:        res.Risk.IsFlagged(),
+			Blocked:        res.Blocked,
+			ReviewRequired: res.ReviewRequired,
+			Risk:           res.Risk,
+			CalibratedP:    res.Calibrated,
+			RuleMatches:    res.RuleMatches,
+			CaseID:         res.CaseID,
+			ScoredAt:       time.Now().UTC(),
+			LatencyUS:      res.LatencyUS,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"results": results, "count": len(results)})
@@ -291,17 +286,18 @@ type healthResponse struct {
 }
 
 func (s *Server) Health(c *gin.Context) {
+	users, _ := s.Store.UserCount(c.Request.Context())
 	c.JSON(http.StatusOK, healthResponse{
 		Status:    "ok",
 		Version:   Version,
 		Uptime:    time.Since(s.Started).Round(time.Second).String(),
-		Users:     s.Store.UserCount(),
+		Users:     users,
 		Detectors: len(s.Ensemble.Detectors()),
 	})
 }
 
 func (s *Server) Stats(c *gin.Context) {
-	stats := s.Store.GetStats()
+	stats, _ := s.Store.GetStats(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{
 		"total_scored":   stats.TotalScored,
 		"total_flagged":  stats.TotalFlagged,

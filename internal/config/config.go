@@ -15,6 +15,13 @@ type Config struct {
 	Port        string
 	Version     string
 
+	// DemoMode controls whether the boot-time synthetic seed/evaluate/
+	// calibrate path runs. In development it defaults to true (so the API
+	// is usable immediately); in production it defaults to false (so we
+	// don't pollute the real store with fake data). Override with
+	// DEMO_MODE=true|false. See DATA-01 in the deep review.
+	DemoMode bool
+
 	// Storage backend: "memory" (default), "redis", "postgres".
 	StorageBackend string
 	RedisAddr      string
@@ -72,10 +79,13 @@ type Config struct {
 
 // Load reads config from the environment.
 func Load() Config {
+	environment := env("ENVIRONMENT", "development")
+
 	return Config{
-		Environment:        env("ENVIRONMENT", "development"),
+		Environment:        environment,
 		Port:               env("PORT", "8080"),
 		Version:            env("VERSION", "2.1.0"),
+		DemoMode:           demoModeDefault(environment),
 		StorageBackend:     env("STORAGE_BACKEND", "memory"),
 		RedisAddr:          env("REDIS_ADDR", "localhost:6379"),
 		PostgresDSN:        env("POSTGRES_DSN", ""),
@@ -170,4 +180,17 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// demoModeDefault resolves the DemoMode flag from DEMO_MODE, falling back
+// to an environment-aware default: true in development (so the API is
+// usable out of the box) and false in production (so we don't pollute the
+// real store with synthetic data or waste cycles on boot-time
+// calibration against a fake dataset). Explicitly setting DEMO_MODE
+// overrides the default in either environment.
+func demoModeDefault(environment string) bool {
+	if v := os.Getenv("DEMO_MODE"); v != "" {
+		return v == "true" || v == "1" || v == "yes"
+	}
+	return environment != "production"
 }

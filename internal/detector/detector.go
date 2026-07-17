@@ -17,14 +17,15 @@
 //   - VelocityDetector — flags users submitting more than N transactions
 //     inside a rolling M-minute window.
 //
-// EnsembleDetector runs all three and fuses their outputs with a weighted
-// vote. Because the weights sum to 1.0 and every sub-score lives in
-// [0, 1], the ensemble score is guaranteed to stay in [0, 1] without any
-// extra normalisation.
+// EnsembleDetector runs all three (plus geo, device, merchant and
+// behavioural detectors) and fuses their outputs with an always-voting
+// log-odds combiner. See EnsembleDetector.Score for the fusion rule.
 package detector
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -46,12 +47,12 @@ type Detector interface {
 	Score(tx models.Transaction) models.RiskScore
 }
 
-// minHistory is the smallest number of same-category historical
-// transactions a detector needs before it will venture an opinion. Below
-// this the statistical estimators are too noisy to be meaningful, so the
-// detector abstains (returns a zero / low score). Five points gives a
-// stable enough mean / IQR to keep the false-positive rate low while the
-// seed data supplies ~6 per (user, category).
+// minHistory is the size at which the per-user baseline is considered
+// fully trusted. Below this the detectors blend the user's statistics
+// with the population baseline (cold-start shrinkage, Finding 3.8)
+// rather than abstaining — the blend weight is alpha = n / minHistory,
+// so a brand-new user (n=0) gets the pure population baseline and a
+// user with minHistory transactions gets the pure user baseline.
 const minHistory = 5
 
 // clean returns a "no anomaly" risk score.
@@ -75,13 +76,25 @@ func clean() models.RiskScore {
 // flight) and every large-but-legitimate purchase looks like an outlier.
 // Only the upper tail is interesting for fraud — an unusually *small*
 // charge is rarely fraud, so negative z-scores are ignored.
+//
+// Cold-start shrinkage (Finding 3.8): when the user has fewer than
+// minHistory same-category transactions, the baseline is blended with the
+// population-wide mean / std for that category:
+//
+//	alpha        = min(1.0, n / minHistory)
+//	blendedMean  = alpha*userMean + (1-alpha)*popMean
+//	blendedStd   = alpha*userStd  + (1-alpha)*popStd
+//
+// A brand-new user (n=0) is therefore scored against the population
+// baseline rather than abstaining — no more cliff at 5 transactions. If
+// the population has no data either, the detector abstains.
 type ZScoreDetector struct {
-	store     *storage.Store
+	store     storage.Store
 	threshold float64 // sigma multiplier that triggers a flag (default 3.0)
 }
 
 // NewZScoreDetector builds a detector with the conventional 3σ threshold.
-func NewZScoreDetector(store *storage.Store) *ZScoreDetector {
+func NewZScoreDetector(store storage.Store) *ZScoreDetector {
 	return &ZScoreDetector{store: store, threshold: 3.0}
 }
 
@@ -90,23 +103,43 @@ func (d *ZScoreDetector) Name() string { return "zscore" }
 
 // Score implements Detector.
 func (d *ZScoreDetector) Score(tx models.Transaction) models.RiskScore {
-	hist := d.store.GetUserHistory(tx.UserID)
+	ctx := context.Background()
+	hist, _ := d.store.GetUserHistory(ctx, tx.UserID)
 
 	// Baseline is per (user, category): see the ZScoreDetector doc comment
 	// for why this matters.
 	amounts := amountsOfCategory(hist, tx.Category)
-	if len(amounts) < minHistory {
+	n := len(amounts)
+
+	// Population baseline (across ALL users) — used for cold-start
+	// shrinkage. If we have neither user nor population data we must
+	// abstain.
+	popMean, popStd := d.store.GlobalCategoryStats(ctx, tx.Category)
+	if n < minHistory && popStd == 0 {
+		// No user baseline and no population baseline — nothing to say.
 		return clean()
 	}
-	mean := stat.Mean(amounts, nil)
-	std := stat.StdDev(amounts, nil)
+
+	// Blend user statistics with the population baseline.
+	alpha := float64(n) / float64(minHistory)
+	if alpha > 1.0 {
+		alpha = 1.0
+	}
+
+	var userMean, userStd float64
+	if n > 0 {
+		userMean = stat.Mean(amounts, nil)
+		userStd = stat.StdDev(amounts, nil)
+	}
+	blendedMean := alpha*userMean + (1-alpha)*popMean
+	blendedStd := alpha*userStd + (1-alpha)*popStd
 
 	// If there is no spread, every transaction is "normal" by definition.
-	if std == 0 {
+	if blendedStd == 0 {
 		return clean()
 	}
 
-	z := (tx.Amount - mean) / std
+	z := (tx.Amount - blendedMean) / blendedStd
 	if z <= d.threshold {
 		return clean()
 	}
@@ -122,7 +155,7 @@ func (d *ZScoreDetector) Score(tx models.Transaction) models.RiskScore {
 	return models.RiskScore{
 		Score:     score,
 		Severity:  models.SeverityFromScore(score),
-		Reasons:   []string{fmt.Sprintf("amount %.2f is %.2fσ above user mean %.2f for category %q (σ=%.2f)", tx.Amount, z, mean, tx.Category, std)},
+		Reasons:   []string{fmt.Sprintf("amount %.2f is %.2fσ above blended mean %.2f for category %q (σ=%.2f, n=%d, α=%.2f)", tx.Amount, z, blendedMean, tx.Category, blendedStd, n, alpha)},
 		Detectors: []string{d.Name()},
 	}
 }
@@ -137,13 +170,18 @@ func (d *ZScoreDetector) Score(tx models.Transaction) models.RiskScore {
 // differences are not mistaken for fraud. The upper fence is the primary
 // fraud signal; the lower fence is down-weighted because small charges
 // are more likely benign "card testing" than large theft.
+//
+// Cold-start shrinkage (Finding 3.8): the per-user Q1 / Q3 are blended
+// with the population Q1 / Q3 using the same alpha = n / minHistory
+// schedule as ZScoreDetector. A brand-new user is scored against the
+// population Tukey fence rather than abstaining.
 type IQRDetector struct {
-	store      *storage.Store
+	store      storage.Store
 	multiplier float64 // IQR multiplier, default 1.5 (Tukey's 1.5)
 }
 
 // NewIQRDetector builds a detector with Tukey's standard 1.5 multiplier.
-func NewIQRDetector(store *storage.Store) *IQRDetector {
+func NewIQRDetector(store storage.Store) *IQRDetector {
 	return &IQRDetector{store: store, multiplier: 1.5}
 }
 
@@ -152,18 +190,35 @@ func (d *IQRDetector) Name() string { return "iqr" }
 
 // Score implements Detector.
 func (d *IQRDetector) Score(tx models.Transaction) models.RiskScore {
-	hist := d.store.GetUserHistory(tx.UserID)
+	ctx := context.Background()
+	hist, _ := d.store.GetUserHistory(ctx, tx.UserID)
 
-	// Baseline is per (user, category); stat.Quantile requires ascending input.
 	amounts := amountsOfCategory(hist, tx.Category)
-	if len(amounts) < minHistory {
+	n := len(amounts)
+
+	// Population quartiles (across ALL users) — used for cold-start
+	// shrinkage.
+	popQ1, popQ3 := d.store.GlobalCategoryQuartiles(ctx, tx.Category)
+	if n < minHistory && popQ1 == 0 && popQ3 == 0 {
+		// No baseline at all — abstain.
 		return clean()
 	}
-	sort.Float64s(amounts)
 
-	q1 := stat.Quantile(0.25, stat.LinInterp, amounts, nil)
-	q3 := stat.Quantile(0.75, stat.LinInterp, amounts, nil)
-	iqr := q3 - q1
+	alpha := float64(n) / float64(minHistory)
+	if alpha > 1.0 {
+		alpha = 1.0
+	}
+
+	var userQ1, userQ3 float64
+	if n > 0 {
+		sorted := append([]float64(nil), amounts...)
+		sort.Float64s(sorted)
+		userQ1 = stat.Quantile(0.25, stat.LinInterp, sorted, nil)
+		userQ3 = stat.Quantile(0.75, stat.LinInterp, sorted, nil)
+	}
+	blendedQ1 := alpha*userQ1 + (1-alpha)*popQ1
+	blendedQ3 := alpha*userQ3 + (1-alpha)*popQ3
+	iqr := blendedQ3 - blendedQ1
 
 	// A zero IQR means the middle 50% of amounts are identical; the
 	// fence collapses to a single point and the rule is meaningless.
@@ -171,8 +226,8 @@ func (d *IQRDetector) Score(tx models.Transaction) models.RiskScore {
 		return clean()
 	}
 
-	upper := q3 + d.multiplier*iqr
-	lower := q1 - d.multiplier*iqr
+	upper := blendedQ3 + d.multiplier*iqr
+	lower := blendedQ1 - d.multiplier*iqr
 
 	switch {
 	case tx.Amount > upper:
@@ -187,7 +242,7 @@ func (d *IQRDetector) Score(tx models.Transaction) models.RiskScore {
 			Score:    score,
 			Severity: models.SeverityFromScore(score),
 			Reasons: []string{
-				fmt.Sprintf("amount %.2f exceeds upper Tukey fence %.2f (Q1=%.2f Q3=%.2f IQR=%.2f)", tx.Amount, upper, q1, q3, iqr),
+				fmt.Sprintf("amount %.2f exceeds upper Tukey fence %.2f (Q1=%.2f Q3=%.2f IQR=%.2f, n=%d, α=%.2f)", tx.Amount, upper, blendedQ1, blendedQ3, iqr, n, alpha),
 			},
 			Detectors: []string{d.Name()},
 		}
@@ -223,7 +278,7 @@ func (d *IQRDetector) Score(tx models.Transaction) models.RiskScore {
 // timestamp. Rapid-fire transactions are a classic fraud signature
 // (stolen card being drained before the bank blocks it).
 type VelocityDetector struct {
-	store *storage.Store
+	store storage.Store
 	// Window is the look-back duration (e.g. 5 minutes).
 	Window time.Duration
 	// MaxTransactions is the number of transactions permitted inside
@@ -237,7 +292,7 @@ type VelocityDetector struct {
 // paying attention while keeping false positives low (the seed data
 // spreads normal spend over days, so honest users essentially never hit
 // this rate).
-func NewVelocityDetector(store *storage.Store) *VelocityDetector {
+func NewVelocityDetector(store storage.Store) *VelocityDetector {
 	return &VelocityDetector{
 		store:           store,
 		Window:          5 * time.Minute,
@@ -250,7 +305,8 @@ func (d *VelocityDetector) Name() string { return "velocity" }
 
 // Score implements Detector.
 func (d *VelocityDetector) Score(tx models.Transaction) models.RiskScore {
-	hist := d.store.GetUserHistory(tx.UserID)
+	ctx := context.Background()
+	hist, _ := d.store.GetUserHistory(ctx, tx.UserID)
 	if len(hist) == 0 {
 		return clean()
 	}
@@ -292,9 +348,28 @@ func (d *VelocityDetector) Score(tx models.Transaction) models.RiskScore {
 // EnsembleDetector
 // ---------------------------------------------------------------------------
 
-// EnsembleDetector fuses the outputs of several detectors with a weighted
-// vote. Weights must be non-negative; they are normalised internally so
-// the caller does not have to be precise.
+// EnsembleDetector fuses the outputs of several detectors with an
+// always-voting log-odds combiner (Finding 3.7). Weights must be
+// non-negative; they are normalised internally so the caller does not
+// have to be precise.
+//
+// The fusion rule:
+//
+//	For each detector i:
+//	  if it fired (score s_i > 0):   logit_i = ln(s_i / (1 - s_i))
+//	  if it abstained (score == 0):  logit_i = ln(0.1 / 0.9) ≈ -2.197
+//	                                     (weak evidence of innocence)
+//	combined_logit = Σ(w_i · logit_i) / Σ(w_i)
+//	combined       = 1 / (1 + exp(-combined_logit))
+//
+// Unlike the previous "weighted average of active voters only" rule,
+// abstaining detectors now contribute a small negative log-odds. This
+// means a single weak detector firing alone pulls the score up only
+// slightly (its positive logit is diluted by the abstainers' negative
+// logits) instead of jumping to its own internal score. The combiner is
+// also well-defined when no detector fires: the all-abstain case yields
+// combined_logit ≈ -2.197 → combined ≈ 0.1, which the pipeline then
+// treats as "low" via SeverityFromScore.
 type EnsembleDetector struct {
 	detectors []Detector
 	weights   []float64
@@ -317,7 +392,7 @@ type EnsembleDetector struct {
 // but the geo, device, merchant, and behavioural detectors add compound
 // signal that catches fraud the amount detectors miss (e.g. a stolen card
 // used in a new country for a "normal" amount at a high-risk merchant).
-func NewEnsembleDetector(store *storage.Store) *EnsembleDetector {
+func NewEnsembleDetector(store storage.Store) *EnsembleDetector {
 	return &EnsembleDetector{
 		detectors: []Detector{
 			NewZScoreDetector(store),
@@ -339,30 +414,51 @@ func (d *EnsembleDetector) Name() string { return "ensemble" }
 // (e.g. tests or a debug endpoint) can introspect the ensemble.
 func (d *EnsembleDetector) Detectors() []Detector { return d.detectors }
 
-// Score implements Detector. It runs every sub-detector and fuses the
-// outputs by weighted voting: only detectors that actually fire
-// (score > 0) participate in the average, so a single strong signal can
-// still raise an alert. This is the standard "weighted average of active
-// voters" fusion rule — abstaining detectors neither inflate nor dilute
-// the score.
-//
-// Concretely: ensemble_score = Σ(w_i · s_i) / Σ(w_i) over firing
-// detectors. If no detector fires, the score is 0 (low risk).
+// abstainLogit is the log-odds an abstaining detector contributes: a
+// weak "evidence of innocence" prior of p=0.1 → logit = ln(0.1/0.9).
+// Chosen to be small enough that a single firing detector can still
+// raise the score, but large enough that a lone firing on an otherwise
+// quiet ensemble doesn't saturate.
+const abstainLogit = -2.1972245773362196 // ln(0.1 / 0.9)
+
+// scoreToLogit converts a per-detector score in (0, 1) to log-odds.
+// Scores of exactly 0 are treated as abstentions by the caller (the
+// ensemble assigns abstainLogit rather than calling this). Scores very
+// close to 0 or 1 are clamped to avoid ±Inf.
+func scoreToLogit(s float64) float64 {
+	switch {
+	case s <= 1e-6:
+		s = 1e-6
+	case s >= 1-1e-6:
+		s = 1 - 1e-6
+	}
+	return math.Log(s / (1 - s))
+}
+
+// Score implements Detector. See EnsembleDetector's doc comment for the
+// fusion rule. Every detector contributes — abstainers push the score
+// down, firers push it up. Reasons from firing detectors are aggregated.
 func (d *EnsembleDetector) Score(tx models.Transaction) models.RiskScore {
 	var (
-		weightedSum float64
-		weightSum   float64
-		reasons     []string
-		fired       []string
+		weightedLogit float64
+		weightSum     float64
+		reasons       []string
+		fired         []string
 	)
 
 	for i, det := range d.detectors {
-		rs := det.Score(tx)
-		if rs.Score <= 0 {
-			continue // detector abstains
+		w := d.weights[i]
+		if w <= 0 {
+			continue
 		}
-		weightedSum += rs.Score * d.weights[i]
-		weightSum += d.weights[i]
+		rs := det.Score(tx)
+		weightSum += w
+		if rs.Score <= 0 {
+			// Abstention: weak evidence of innocence.
+			weightedLogit += w * abstainLogit
+			continue
+		}
+		weightedLogit += w * scoreToLogit(rs.Score)
 		fired = append(fired, det.Name())
 		if len(rs.Reasons) > 0 {
 			reasons = append(reasons, rs.Reasons...)
@@ -371,7 +467,8 @@ func (d *EnsembleDetector) Score(tx models.Transaction) models.RiskScore {
 
 	var combined float64
 	if weightSum > 0 {
-		combined = weightedSum / weightSum
+		combinedLogit := weightedLogit / weightSum
+		combined = 1.0 / (1.0 + math.Exp(-combinedLogit))
 	}
 	// Clamp against floating-point drift.
 	if combined > 1.0 {

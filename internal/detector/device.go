@@ -13,6 +13,7 @@
 package detector
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/gadda00/fraud-detection-system/internal/models"
@@ -22,7 +23,7 @@ import (
 // DeviceFingerprintDetector flags transactions from devices the user has
 // not used before (or has used very rarely).
 type DeviceFingerprintDetector struct {
-	store *storage.Store
+	store storage.Store
 	// TrustedThreshold is the number of times a device must have appeared
 	// in history before it is considered trusted.
 	TrustedThreshold int
@@ -30,7 +31,7 @@ type DeviceFingerprintDetector struct {
 
 // NewDeviceFingerprintDetector builds a detector with a threshold of 2
 // (a device seen at least twice in the last 100 transactions is trusted).
-func NewDeviceFingerprintDetector(store *storage.Store) *DeviceFingerprintDetector {
+func NewDeviceFingerprintDetector(store storage.Store) *DeviceFingerprintDetector {
 	return &DeviceFingerprintDetector{
 		store:            store,
 		TrustedThreshold: 2,
@@ -47,7 +48,7 @@ func (d *DeviceFingerprintDetector) Score(tx models.Transaction) models.RiskScor
 		return clean()
 	}
 
-	hist := d.store.GetUserHistory(tx.UserID)
+	hist, _ := d.store.GetUserHistory(context.Background(), tx.UserID)
 	if len(hist) == 0 {
 		// Brand-new user — can't say whether the device is novel.
 		return clean()

@@ -1,12 +1,18 @@
 package detector
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/gadda00/fraud-detection-system/internal/models"
 	"github.com/gadda00/fraud-detection-system/internal/storage"
 )
+
+// ctx is a background context reused by every test in this file. The
+// in-memory MemStore ignores it; we just need to satisfy the Store
+// interface signature.
+var ctx = context.Background()
 
 // ----- ZScoreDetector -----
 
@@ -24,7 +30,7 @@ func TestZScore_FlagsHighAmount(t *testing.T) {
 	store := storage.New()
 	// Seed 6 normal shopping transactions with some variance so std > 0.
 	for _, a := range []float64{28, 30, 32, 29, 31, 30} {
-		store.Seed(models.Transaction{UserID: "u1", Amount: a, Category: "shopping", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: a, Category: "shopping", Timestamp: time.Now()})
 	}
 	d := NewZScoreDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 500, Category: "shopping", Timestamp: time.Now()}
@@ -40,7 +46,7 @@ func TestZScore_FlagsHighAmount(t *testing.T) {
 func TestZScore_DoesNotFlagNormalAmount(t *testing.T) {
 	store := storage.New()
 	for i := 0; i < 6; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: time.Now()})
 	}
 	d := NewZScoreDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 32, Category: "shopping", Timestamp: time.Now()}
@@ -54,8 +60,8 @@ func TestZScore_PerCategoryBaseline(t *testing.T) {
 	store := storage.New()
 	// 6 small shopping + 6 large travel with variance.
 	for i := 0; i < 6; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30 + float64(i), Category: "shopping", Timestamp: time.Now()})
-		store.Seed(models.Transaction{UserID: "u1", Amount: 500 + float64(i), Category: "travel", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30 + float64(i), Category: "shopping", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 500 + float64(i), Category: "travel", Timestamp: time.Now()})
 	}
 	d := NewZScoreDetector(store)
 	// A travel amount within the normal travel range should not flag.
@@ -71,7 +77,7 @@ func TestZScore_PerCategoryBaseline(t *testing.T) {
 func TestIQR_FlagsUpperOutlier(t *testing.T) {
 	store := storage.New()
 	for _, a := range []float64{10, 12, 14, 15, 16, 18, 20, 22, 25} {
-		store.Seed(models.Transaction{UserID: "u1", Amount: a, Category: "dining", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: a, Category: "dining", Timestamp: time.Now()})
 	}
 	d := NewIQRDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 100, Category: "dining", Timestamp: time.Now()}
@@ -97,7 +103,7 @@ func TestVelocity_FlagsRapidBurst(t *testing.T) {
 	now := time.Now()
 	// 6 transactions in the last 3 minutes — exceeds the 4-in-5-min default.
 	for i := 0; i < 6; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: now.Add(-time.Duration(30-i) * time.Second)})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: now.Add(-time.Duration(30-i) * time.Second)})
 	}
 	d := NewVelocityDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: now}
@@ -112,7 +118,7 @@ func TestVelocity_DoesNotFlagNormalCadence(t *testing.T) {
 	now := time.Now()
 	// 4 transactions spread over a day — normal cadence.
 	for i := 0; i < 4; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: now.Add(-time.Duration(24-i) * time.Hour)})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: now.Add(-time.Duration(24-i) * time.Hour)})
 	}
 	d := NewVelocityDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: now}
@@ -127,7 +133,7 @@ func TestGeoDistance_FlagsFarCountry(t *testing.T) {
 	store := storage.New()
 	// Seed history in the US.
 	for i := 0; i < 5; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Country: "US", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Country: "US", Timestamp: time.Now()})
 	}
 	d := NewGeoDistanceDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Country: "RU", Timestamp: time.Now()}
@@ -140,7 +146,7 @@ func TestGeoDistance_FlagsFarCountry(t *testing.T) {
 func TestGeoDistance_DoesNotFlagHomeCountry(t *testing.T) {
 	store := storage.New()
 	for i := 0; i < 5; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Country: "US", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Country: "US", Timestamp: time.Now()})
 	}
 	d := NewGeoDistanceDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Country: "US", Timestamp: time.Now()}
@@ -155,7 +161,7 @@ func TestDevice_NewDeviceFlagged(t *testing.T) {
 	store := storage.New()
 	// History with dev-1.
 	for i := 0; i < 5; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", DeviceID: "dev-1", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", DeviceID: "dev-1", Timestamp: time.Now()})
 	}
 	d := NewDeviceFingerprintDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", DeviceID: "dev-2", Timestamp: time.Now()}
@@ -169,7 +175,7 @@ func TestDevice_TrustedDeviceNotFlagged(t *testing.T) {
 	store := storage.New()
 	// 5 transactions with dev-1 — above the trusted threshold of 2.
 	for i := 0; i < 5; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", DeviceID: "dev-1", Timestamp: time.Now()})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", DeviceID: "dev-1", Timestamp: time.Now()})
 	}
 	d := NewDeviceFingerprintDetector(store)
 	tx := models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", DeviceID: "dev-1", Timestamp: time.Now()}
@@ -205,7 +211,7 @@ func TestBehavioral_QuietHoursFlagged(t *testing.T) {
 	store := storage.New()
 	// Seed history all during business hours (9am-5pm UTC).
 	for i := 0; i < 10; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: time.Date(2026, 1, 1+i, 12, 0, 0, 0, time.UTC)})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: time.Date(2026, 1, 1+i, 12, 0, 0, 0, time.UTC)})
 	}
 	d := NewBehavioralAnomalyDetector(store)
 	// Score a transaction at 3am.
@@ -222,7 +228,7 @@ func TestEnsemble_CombinesDetectors(t *testing.T) {
 	store := storage.New()
 	// Seed normal US shopping history with variance.
 	for i := 0; i < 6; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30 + float64(i), Category: "shopping", Country: "US", DeviceID: "dev-1", Timestamp: time.Now().Add(-time.Duration(6-i) * time.Hour)})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30 + float64(i), Category: "shopping", Country: "US", DeviceID: "dev-1", Timestamp: time.Now().Add(-time.Duration(6-i) * time.Hour)})
 	}
 	ens := NewEnsembleDetector(store)
 	// A high-amount transaction in a new country from a new device at a high-risk merchant.
@@ -242,7 +248,7 @@ func TestEnsemble_CombinesDetectors(t *testing.T) {
 func TestEnsemble_NormalTransactionLowRisk(t *testing.T) {
 	store := storage.New()
 	for i := 0; i < 6; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30 + float64(i), Category: "shopping", Country: "US", DeviceID: "dev-1", Timestamp: time.Now().Add(-time.Duration(6-i) * time.Hour)})
+		_ = store.Seed(ctx, models.Transaction{UserID: "u1", Amount: 30 + float64(i), Category: "shopping", Country: "US", DeviceID: "dev-1", Timestamp: time.Now().Add(-time.Duration(6-i) * time.Hour)})
 	}
 	ens := NewEnsembleDetector(store)
 	tx := models.Transaction{

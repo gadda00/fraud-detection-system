@@ -1,8 +1,16 @@
 # Fraud Detection System
 
-> **Enterprise-grade real-time transaction fraud scoring — a multi-signal
-> ensemble engine that scores transactions in sub-millisecond latency with
-> full explainability for regulated finance.**
+> **Production-oriented real-time transaction fraud scoring — a
+> multi-signal ensemble engine that scores transactions in sub-millisecond
+> latency with full explainability for regulated finance.**
+
+> ⚠️ **On benchmark honesty.** Synthetic benchmark metrics reported below
+> (84% recall, 1.37% FPR) are from a **deterministic seed dataset**, not
+> independent validation on real transaction data. Treat them as a
+> regression baseline for the codebase, not as a deployable performance
+> claim. Real-world recall/FPR will depend on fraud mix, labelling
+> quality, and traffic shape — none of which a synthetic dataset
+> captures.
 
 [![CI](https://github.com/gadda00/fraud-detection-system/actions/workflows/ci.yml/badge.svg)](https://github.com/gadda00/fraud-detection-system/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
@@ -218,6 +226,11 @@ Response:
 
 ## Performance
 
+> ⚠️ **These metrics are from the deterministic synthetic seed dataset,
+> not independent validation on real transaction data.** They are useful
+> as a regression baseline for the codebase, not as a deployable
+> performance claim.
+
 Measured on the built-in offline evaluation (1,000 labelled transactions,
 950 normal + 50 fraud, replayed chronologically with no leakage):
 
@@ -294,8 +307,10 @@ docker run --rm -p 8080:8080 \
   fraud-detection-system:latest
 ```
 
-The service seeds itself with 1,000 transactions on boot, so every
-endpoint is usable immediately.
+The service seeds itself with 1,000 transactions on boot **in
+development mode**, so every endpoint is usable immediately. In
+production (`ENVIRONMENT=production`) the seed/evaluate/calibrate path
+is skipped by default — set `DEMO_MODE=true` to opt back in.
 
 ---
 
@@ -307,8 +322,9 @@ All configuration is via environment variables (12-factor). See
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENVIRONMENT` | `development` | `development` or `production` |
+| `DEMO_MODE` | `true` in dev, `false` in prod | Run boot-time synthetic seed / evaluate / calibrate path |
 | `PORT` | `8080` | HTTP listen port |
-| `STORAGE_BACKEND` | `memory` | `memory`, `redis`, or `postgres` |
+| `STORAGE_BACKEND` | `memory` | `memory` (only `memory` is currently wired; `redis` / `postgres` backends exist but are not selected in `main.go`) |
 | `REDIS_ADDR` | `localhost:6379` | Redis address (if backend=redis) |
 | `POSTGRES_DSN` | — | Postgres DSN (if backend=postgres) |
 | `AUTH_REQUIRED` | `false` | Require auth on all endpoints |
@@ -316,8 +332,9 @@ All configuration is via environment variables (12-factor). See
 | `JWT_SECRET` | — | HMAC secret for JWT signing |
 | `RULES_PATH` | — | Path to rules JSON file |
 | `SLACK_WEBHOOK_URL` | — | Slack incoming webhook for alerts |
+| `STRIPE_API_KEY` | — | Stripe key for card blocking on confirmed fraud |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/gRPC endpoint for tracing |
-| `RATE_LIMIT_PER_SECOND` | `1000` | Max requests per second per IP |
+| `RATE_LIMIT_PER_SECOND` | `1000` | Max requests per second per IP (0 disables) |
 
 ---
 
@@ -342,7 +359,7 @@ fraud-detection-system/
 ├── deploy/
 │   ├── k8s/                         # Kubernetes Deployment + HPA
 │   ├── rules.example.json           # Sample rules file
-│   └── helm/                        # (placeholder) Helm chart
+│   └── grafana/                     # Grafana dashboard JSON
 ├── .github/workflows/ci.yml         # Test + lint + security + build
 ├── Dockerfile                       # Multi-stage, distroless, ~15 MB
 ├── Makefile
@@ -366,15 +383,75 @@ auth, and the ML calibrator.
 
 ## Roadmap
 
-- [ ] Postgres-backed storage implementation
-- [ ] Kafka ingestion endpoint (streaming)
-- [ ] Stripe webhook integration (auto-block card on confirmed fraud)
-- [ ] Email + SMS alerts alongside Slack
-- [ ] Grafana dashboard JSON
-- [ ] Model retraining pipeline (offline → online calibrator refresh)
-- [ ] Graph network detector (user-merchant bipartite fraud rings)
-- [ ] Helm chart
-- [ ] Multi-tenant isolation
+This is the honest version. The repo previously advertised a flat "todo"
+list that mixed genuinely missing features with work that was already
+merged. The three buckets below separate what works end-to-end, what
+exists but isn't connected, and what isn't built at all.
+
+### Shipped and wired (works end-to-end)
+
+- **7 statistical detectors + weighted-vote ensemble** — z-score, IQR,
+  velocity, geo-distance, device fingerprint, merchant risk,
+  behavioral anomaly. All contribute to the live `/api/score` score.
+- **Logistic calibrator** — fitted on the labelled seed dataset in dev
+  mode and exposed via the `calibrated_probability` field in the score
+  response.
+- **Deterministic rules engine** — JSON-configured, hot-reloadable via
+  `POST /admin/rules/reload`. `block`, `review`, and `flag` actions all
+  wired into the live score path (flag weights blend into the ensemble
+  score before the block/critical override).
+- **Case management** — full lifecycle (open → in_review → confirmed /
+  false_positive / escalated) exposed via `/api/cases*`. Resolution
+  hooks fan out async.
+- **Stripe integration** — `OnCaseConfirmed` fires from the case
+  manager when an analyst confirms fraud (card block + Radar fraud
+  marker). Disabled (no-op) when `STRIPE_API_KEY` is unset.
+- **Multi-channel alerts** — Slack (webhook), Email (SMTP), SMS
+  (Twilio) fanned out through `MultiNotifier` on flagged transactions.
+- **API key + JWT auth, RBAC** — admin / analyst / service / readonly
+  roles enforced via `RequireRole`. Constant-time API key compare; JWT
+  role claim is null-safe. Dev-mode attaches a synthetic admin principal
+  so the protected endpoints are usable without credentials.
+- **Rate limiting** — per-IP token bucket (`golang.org/x/time/rate`)
+  with idle eviction, configured via `RATE_LIMIT_PER_SECOND`.
+- **Kafka consumer** — optional streaming ingestion started when
+  `KAFKA_BROKERS` is set.
+- **Retraining pipeline** — nightly calibrator refresh on analyst
+  labels, started at boot.
+- **Observability** — zerolog structured logging, Prometheus metrics at
+  `/metrics`, OpenTelemetry tracing via OTLP/gRPC, Grafana dashboard
+  JSON in `deploy/grafana/`.
+- **Geo detector country table** — ~195 ISO-3166 country centroids;
+  `fraud_geo_detector_unmapped_country_total` Prometheus counter
+  surfaces unmapped-country hits.
+- **DEMO_MODE guard** — synthetic seed / evaluate / calibrate path is
+  skipped in production by default; opt back in with `DEMO_MODE=true`.
+- **CI** — test (race) + lint + govulncheck (fails on HIGH/CRITICAL) +
+  Docker build (no push).
+
+### Built, not yet wired (code exists but isn't connected)
+
+- **Postgres storage backend** (`internal/storage/postgres.go`) — full
+  schema + pool, but `main.go` always calls `storage.New()` (in-memory).
+  Needs a backend-selection branch in `main.go` keyed on
+  `cfg.StorageBackend == "postgres"`.
+- **Redis storage backend** (`internal/storage/redis.go`) — same
+  situation as Postgres. Needs the same selection branch.
+- **Graph network detector (user-merchant bipartite fraud rings)** —
+  not started; see "Not started" below.
+
+### Not started
+
+- **Graph network detector** — user-merchant bipartite fraud-ring
+  detection. No code yet.
+- **Helm chart** — referenced in the old README as a "placeholder"
+  under `deploy/helm/`; that directory does not exist.
+- **Multi-tenant isolation** — `Principal.TenantID` is plumbed through
+  auth but no handler filters cases / stats by tenant yet.
+- **Independent real-data validation** — every metric in this README is
+  from the synthetic seed dataset. An honest recall/FPR claim against
+  real (or even Kaggle-style public) transaction data has not been
+  produced.
 
 ---
 

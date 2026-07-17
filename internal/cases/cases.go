@@ -79,6 +79,26 @@ type Note struct {
 type Manager struct {
 	mu    sync.RWMutex
 	cases map[string]*Case
+	// hooks are invoked (in their own goroutine) when a case is resolved
+	// as StatusConfirmed. Use OnResolve to register them — typical
+	// consumers are the Stripe card-block integration and the model
+	// retraining pipeline.
+	hooks []ResolveHook
+}
+
+// ResolveHook is invoked asynchronously after a case is confirmed as
+// fraud. Implementations must be safe to call from a fresh goroutine and
+// should respect a context timeout if they make outbound calls.
+type ResolveHook func(c *Case)
+
+// OnResolve registers a hook to fire when a case is resolved as
+// StatusConfirmed. Safe to call at any time; the registered hook will be
+// observed by subsequent Resolve calls. Hooks fire in their own
+// goroutines, in registration order.
+func (m *Manager) OnResolve(h ResolveHook) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hooks = append(m.hooks, h)
 }
 
 // NewManager creates an empty case manager.
@@ -154,9 +174,9 @@ func (m *Manager) Assign(id, analyst string) error {
 // Resolve closes a case with the given final status.
 func (m *Manager) Resolve(id string, status Status, analyst, note string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	c, ok := m.cases[id]
 	if !ok {
+		m.mu.Unlock()
 		return errCaseNotFound
 	}
 	now := time.Now().UTC()
@@ -171,6 +191,18 @@ func (m *Manager) Resolve(id string, status Status, analyst, note string) error 
 			Text:      note,
 			CreatedAt: now,
 		})
+	}
+	// Snapshot the hooks under the lock so a hook that registers another
+	// hook doesn't race with our iteration. Hooks fire asynchronously so
+	// they can't deadlock against the manager mutex.
+	var hooks []ResolveHook
+	if status == StatusConfirmed {
+		hooks = append([]ResolveHook(nil), m.hooks...)
+	}
+	m.mu.Unlock()
+
+	for _, h := range hooks {
+		go h(c)
 	}
 	return nil
 }

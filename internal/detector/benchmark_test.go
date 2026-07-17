@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -9,13 +10,16 @@ import (
 	"github.com/gadda00/fraud-detection-system/internal/storage"
 )
 
+// bg is a background context reused by every benchmark in this file.
+var bg = context.Background()
+
 // BenchmarkEnsemble_Score measures the per-transaction scoring latency.
 // The target is < 1ms per transaction (we typically see 50-300µs).
 func BenchmarkEnsemble_Score(b *testing.B) {
 	store := storage.New()
 	// Seed 100 transactions to give the detectors a realistic baseline.
 	for i := 0; i < 100; i++ {
-		store.Seed(models.Transaction{
+		_ = store.Seed(bg, models.Transaction{
 			UserID:    "u1",
 			Amount:    30 + float64(i%20),
 			Category:  "shopping",
@@ -48,7 +52,7 @@ func BenchmarkEnsemble_Score(b *testing.B) {
 func BenchmarkEnsemble_ScoreParallel(b *testing.B) {
 	store := storage.New()
 	for i := 0; i < 100; i++ {
-		store.Seed(models.Transaction{
+		_ = store.Seed(bg, models.Transaction{
 			UserID:    "u1",
 			Amount:    30 + float64(i%20),
 			Category:  "shopping",
@@ -86,7 +90,7 @@ func BenchmarkStore_Add(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		store.Add(tx, risk)
+		_ = store.Add(bg, tx, risk)
 	}
 }
 
@@ -94,12 +98,12 @@ func BenchmarkStore_Add(b *testing.B) {
 func BenchmarkStore_GetUserHistory(b *testing.B) {
 	store := storage.New()
 	for i := 0; i < 100; i++ {
-		store.Seed(models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: time.Now()})
+		_ = store.Seed(bg, models.Transaction{UserID: "u1", Amount: 30, Category: "shopping", Timestamp: time.Now()})
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		store.GetUserHistory("u1")
+		_, _ = store.GetUserHistory(bg, "u1")
 	}
 }
 
@@ -111,7 +115,7 @@ func BenchmarkEnsemble_MultiUser(b *testing.B) {
 	for u := 0; u < 50; u++ {
 		userID := fmt.Sprintf("u%d", u)
 		for i := 0; i < 20; i++ {
-			store.Seed(models.Transaction{
+			_ = store.Seed(bg, models.Transaction{
 				UserID:    userID,
 				Amount:    30 + float64(i%20),
 				Category:  "shopping",

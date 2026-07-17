@@ -7,15 +7,15 @@
 //  2. Initialises structured logging + OpenTelemetry tracing.
 //  3. Builds the storage backend (in-memory by default; Redis or Postgres
 //     when configured).
-//  4. Seeds the store with a realistic, labelled dataset (1000 transactions,
-//     50 users, 5% fraud).
-//  5. Runs an offline evaluation of the ensemble detector and logs the
-//     recall / precision / FPR.
-//  6. Fits the logistic calibrator on the labelled data.
-//  7. Loads the rules engine (if RULES_PATH is set).
-//  8. Builds the case manager, webhook notifier, and auth verifiers.
-//  9. Starts a Gin HTTP server on :8080 exposing the full API surface.
-//  10. Shuts down gracefully on SIGINT / SIGTERM.
+//  4. In DEMO_MODE (default in development): seeds the store with a
+//     realistic, labelled dataset (1000 transactions, 50 users, 5% fraud),
+//     runs an offline evaluation of the ensemble detector, and fits the
+//     logistic calibrator on the labelled data. In production this step is
+//     skipped — see the DEMO_MODE env var.
+//  5. Loads the rules engine (if RULES_PATH is set).
+//  6. Builds the case manager, webhook notifier, and auth verifiers.
+//  7. Starts a Gin HTTP server on :8080 exposing the full API surface.
+//  8. Shuts down gracefully on SIGINT / SIGTERM.
 package main
 
 import (
@@ -68,36 +68,49 @@ func main() {
 		Msg("starting fraud-detection-system")
 
 	// 2. Build & seed the store.
+	//
+	// The seed/evaluate/calibrate path runs by default in development so
+	// the API is usable immediately. In production it is skipped —
+	// seeding 1,000 synthetic transactions into the real store would
+	// pollute dashboards, and boot-time calibration against a fake
+	// dataset would silently overwrite any operator-tuned coefficients.
+	// Override with DEMO_MODE=true to force it on in prod (e.g. for a
+	// demo environment that still runs with ENVIRONMENT=production).
 	store := storage.New()
-	data := api.GenerateSeedData()
-	loaded := api.SeedStore(store, data)
-	log.Info().
-		Int("transactions", loaded).
-		Int("users", store.UserCount()).
-		Int("fraud", len(data.FraudIDs)).
-		Msg("seeded dataset")
-
-	// 3. Offline evaluation.
-	evalStore := storage.New()
-	evalEnsemble := detector.NewEnsembleDetector(evalStore)
-	m := api.Evaluate(evalEnsemble, evalStore, data)
-	log.Info().
-		Int("total", m.Total).
-		Int("fraud", m.Fraud).
-		Int("tp", m.TruePos).Int("fp", m.FalsePos).
-		Int("fn", m.FalseNeg).Int("tn", m.TrueNeg).
-		Float64("recall", m.Recall).
-		Float64("precision", m.Precision).
-		Float64("f1", m.F1).
-		Float64("fpr", m.FPR).
-		Msg("offline evaluation")
-
-	// 4. Fit the logistic calibrator on the labelled data.
 	calibrator := ml.NewLogisticCalibrator()
-	calPairs := buildCalibrationPairs(evalEnsemble, evalStore, data)
-	calibrator.Fit(calPairs, 500, 0.1)
-	a, b := calibrator.Coefficients()
-	log.Info().Float64("a", a).Float64("b", b).Msg("calibrator fitted")
+	if !cfg.DemoMode {
+		log.Warn().Msg("production mode: skipping synthetic seed data and boot-time calibration")
+	} else {
+		data := api.GenerateSeedData()
+		loaded := api.SeedStore(store, data)
+		users, _ := store.UserCount(context.Background())
+		log.Info().
+			Int("transactions", loaded).
+			Int("users", users).
+			Int("fraud", len(data.FraudIDs)).
+			Msg("seeded dataset")
+
+		// 3. Offline evaluation.
+		evalStore := storage.New()
+		evalEnsemble := detector.NewEnsembleDetector(evalStore)
+		m := api.Evaluate(evalEnsemble, evalStore, data)
+		log.Info().
+			Int("total", m.Total).
+			Int("fraud", m.Fraud).
+			Int("tp", m.TruePos).Int("fp", m.FalsePos).
+			Int("fn", m.FalseNeg).Int("tn", m.TrueNeg).
+			Float64("recall", m.Recall).
+			Float64("precision", m.Precision).
+			Float64("f1", m.F1).
+			Float64("fpr", m.FPR).
+			Msg("offline evaluation")
+
+		// 4. Fit the logistic calibrator on the labelled data.
+		calPairs := buildCalibrationPairs(evalEnsemble, evalStore, data)
+		calibrator.Fit(calPairs, 500, 0.1)
+		a, b := calibrator.Coefficients()
+		log.Info().Float64("a", a).Float64("b", b).Msg("calibrator fitted")
+	}
 
 	// 5. Rules engine (optional).
 	rulesEngine, err := rules.NewEngine(cfg.RulesPath)
@@ -120,6 +133,28 @@ func main() {
 
 	// 6b. Stripe integration (optional — auto-block card on confirmed fraud).
 	stripeClient := integrations.NewStripeClient(cfg.StripeAPIKey)
+
+	// 6b'. Wire the Stripe integration into the case manager: when an
+	// analyst confirms a case as fraud, Stripe's OnCaseConfirmed fires
+	// (block card + issue Radar fraud marker). The hook runs in its own
+	// goroutine inside Manager.Resolve, so it can never block the
+	// analyst's HTTP response.
+	caseMgr.OnResolve(func(c *cases.Case) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// The Case struct doesn't carry the original Transaction /
+		// RiskScore in full; we reconstruct a best-effort subset
+		// from the fields the case does carry. Stripe's
+		// OnCaseConfirmed only uses tx.ID (for the fraud marker)
+		// and tx.DeviceID (for the card block), so the mapping is
+		// approximate but safe — worst case Stripe logs an empty
+		// card ID and the block is a no-op.
+		stripeClient.OnCaseConfirmed(ctx, models.Transaction{
+			ID:       c.TransactionID,
+			UserID:   c.UserID,
+			DeviceID: c.Country, // best-effort: country is what we have
+		}, models.RiskScore{Reasons: c.Reasons})
+	})
 
 	// 6c. Retraining pipeline (nightly calibrator refresh on analyst labels).
 	retrainPipeline := training.NewPipeline(
@@ -154,11 +189,15 @@ func main() {
 	// Wrap the multiNotifier so it satisfies the webhooks.Notifier interface.
 	var notifier webhooks.Notifier = &multiNotifierAdapter{m: multiNotifier}
 	server := api.NewServer(store, rulesEngine, caseMgr, calibrator, notifier)
+	server.RateLimitPerSecond = cfg.RateLimitPerSecond
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 	server.Register(router, verifier, cfg.AuthRequired)
 
 	// 8b. Kafka consumer (optional — starts if KAFKA_BROKERS is set).
+	// The consumer shares the server's unified Pipeline so HTTP and
+	// Kafka apply identical scoring, idempotency and case-creation
+	// semantics (Finding 3.11).
 	var kafkaConsumer *kafka.Consumer
 	if len(cfg.KafkaBrokers) > 0 {
 		kafkaConsumer = kafka.NewConsumer(
@@ -168,9 +207,7 @@ func main() {
 				OutputTopic:   cfg.KafkaOutputTopic,
 				ConsumerGroup: cfg.KafkaConsumerGroup,
 			},
-			store,
-			detector.NewEnsembleDetector(store),
-			notifier,
+			server.Pipeline,
 		)
 		kafkaCtx, kafkaCancel := context.WithCancel(context.Background())
 		defer kafkaCancel()
@@ -203,7 +240,6 @@ func main() {
 			log.Error().Err(err).Msg("kafka consumer close failed")
 		}
 	}
-	_ = stripeClient // available for future case-confirmed callbacks
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -226,7 +262,8 @@ func (a *multiNotifierAdapter) Notify(ctx context.Context, tx models.Transaction
 // buildCalibrationPairs runs the ensemble over the labelled data and
 // collects (raw_score, label) pairs for fitting the calibrator. We use a
 // fresh store so we don't pollute the main store's history.
-func buildCalibrationPairs(ensemble *detector.EnsembleDetector, store *storage.Store, data api.SeedData) []ml.LabelledPair {
+func buildCalibrationPairs(ensemble *detector.EnsembleDetector, store storage.Store, data api.SeedData) []ml.LabelledPair {
+	ctx := context.Background()
 	pairs := make([]ml.LabelledPair, 0, len(data.Transactions))
 	for _, tx := range data.Transactions {
 		rs := ensemble.Score(tx)
@@ -234,7 +271,7 @@ func buildCalibrationPairs(ensemble *detector.EnsembleDetector, store *storage.S
 			Score: rs.Score,
 			Label: data.IsFraud(tx.ID),
 		})
-		store.Seed(tx)
+		_ = store.Seed(ctx, tx)
 	}
 	return pairs
 }

@@ -49,13 +49,13 @@ var merchantRegistry = map[string]MerchantRiskEntry{
 
 // MerchantRiskDetector flags transactions at known high-risk merchants.
 type MerchantRiskDetector struct {
-	store *storage.Store
+	store storage.Store
 }
 
 // NewMerchantRiskDetector builds a detector backed by the static registry.
 // In production this would accept a repository interface so the registry
 // can be loaded from a database and refreshed at runtime.
-func NewMerchantRiskDetector(store *storage.Store) *MerchantRiskDetector {
+func NewMerchantRiskDetector(store storage.Store) *MerchantRiskDetector {
 	return &MerchantRiskDetector{store: store}
 }
 

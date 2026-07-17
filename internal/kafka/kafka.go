@@ -1,5 +1,9 @@
 // Package kafka provides a Kafka consumer that ingests transactions from a
-// `transactions` topic and scores them in real time.
+// `transactions` topic and scores them in real time via the unified
+// pipeline (internal/pipeline.Pipeline). The pipeline is shared with the
+// HTTP path so both ingestion routes apply the same idempotency,
+// FlagWeight blend, case-creation and notification semantics (Finding
+// 3.11).
 package kafka
 
 import (
@@ -8,11 +12,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gadda00/fraud-detection-system/internal/detector"
 	"github.com/gadda00/fraud-detection-system/internal/middleware"
 	"github.com/gadda00/fraud-detection-system/internal/models"
-	"github.com/gadda00/fraud-detection-system/internal/storage"
-	"github.com/gadda00/fraud-detection-system/internal/webhooks"
+	"github.com/gadda00/fraud-detection-system/internal/pipeline"
 	"github.com/rs/zerolog/log"
 	"github.com/segmentio/kafka-go"
 )
@@ -26,18 +28,19 @@ type Config struct {
 	CommitInterval time.Duration
 }
 
-// Consumer runs the Kafka → score → produce loop.
+// Consumer runs the Kafka → score → produce loop. Since Phase 1 the
+// scoring work is delegated to a *pipeline.Pipeline; the consumer no
+// longer holds a Store / Ensemble / Notifier directly — those all live
+// inside the pipeline.
 type Consumer struct {
 	cfg      Config
-	store    *storage.Store
-	ensemble *detector.EnsembleDetector
-	notifier webhooks.Notifier
+	pipeline *pipeline.Pipeline
 	reader   *kafka.Reader
 	writer   *kafka.Writer
 }
 
 // NewConsumer builds a Kafka consumer. Call Start() to begin consuming.
-func NewConsumer(cfg Config, store *storage.Store, ensemble *detector.EnsembleDetector, notifier webhooks.Notifier) *Consumer {
+func NewConsumer(cfg Config, pipe *pipeline.Pipeline) *Consumer {
 	if cfg.InputTopic == "" {
 		cfg.InputTopic = "transactions"
 	}
@@ -68,9 +71,7 @@ func NewConsumer(cfg Config, store *storage.Store, ensemble *detector.EnsembleDe
 
 	return &Consumer{
 		cfg:      cfg,
-		store:    store,
-		ensemble: ensemble,
-		notifier: notifier,
+		pipeline: pipe,
 		reader:   reader,
 		writer:   writer,
 	}
@@ -118,9 +119,12 @@ type AlertMessage struct {
 	LatencyUS     int64            `json:"latency_us"`
 }
 
+// processMessage is the per-message handler. It decodes the transaction,
+// runs it through the pipeline, records Prometheus metrics, and — if the
+// transaction was flagged — publishes an AlertMessage to the output
+// topic. The webhook notification, case creation and persistence all
+// happen inside Pipeline.Process so this function stays a thin adapter.
 func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message) {
-	start := time.Now()
-
 	var tx models.Transaction
 	if err := json.Unmarshal(msg.Value, &tx); err != nil {
 		log.Error().Err(err).Bytes("raw", msg.Value).Msg("kafka unmarshal transaction")
@@ -133,41 +137,37 @@ func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message) {
 		tx.Timestamp = time.Now().UTC()
 	}
 
-	risk := c.ensemble.Score(tx)
-	c.store.Add(tx, risk)
-	middleware.RecordScoring(risk.Severity, risk.IsFlagged(), float64(time.Since(start).Microseconds()))
+	res, err := c.pipeline.Process(ctx, tx)
+	if err != nil {
+		log.Error().Err(err).Str("tx_id", tx.ID).Msg("kafka pipeline process")
+		return
+	}
 
-	if risk.IsFlagged() {
+	middleware.RecordScoring(res.Risk.Severity, res.Risk.IsFlagged(), float64(res.LatencyUS))
+
+	if res.Risk.IsFlagged() {
 		alert := AlertMessage{
 			TransactionID: tx.ID,
 			UserID:        tx.UserID,
 			Amount:        tx.Amount,
 			Currency:      tx.Currency,
-			Flagged:       risk.IsFlagged(),
-			Risk:          risk,
+			Flagged:       res.Risk.IsFlagged(),
+			Risk:          res.Risk,
 			ScoredAt:      time.Now().UTC(),
-			LatencyUS:     time.Since(start).Microseconds(),
+			LatencyUS:     res.LatencyUS,
 		}
 		payload, _ := json.Marshal(alert)
 		if err := c.writer.WriteMessages(ctx, kafka.Message{Value: payload}); err != nil {
 			log.Error().Err(err).Str("tx_id", tx.ID).Msg("kafka publish alert")
 		}
-
-		go func() {
-			notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := c.notifier.Notify(notifyCtx, tx, risk); err != nil {
-				log.Error().Err(err).Str("tx_id", tx.ID).Msg("kafka webhook notify")
-			}
-		}()
 	}
 
 	log.Debug().
 		Str("tx_id", tx.ID).
 		Str("user_id", tx.UserID).
-		Float64("score", risk.Score).
-		Str("severity", risk.Severity).
-		Int64("latency_us", time.Since(start).Microseconds()).
+		Float64("score", res.Risk.Score).
+		Str("severity", res.Risk.Severity).
+		Int64("latency_us", res.LatencyUS).
 		Msg("kafka scored")
 }
 
