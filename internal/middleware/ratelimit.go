@@ -36,8 +36,7 @@ type rateLimiter struct {
 // RateLimit invocation so each route group can have its own perSecond
 // budget if desired.
 type rateLimiterStore struct {
-	mu        sync.Mutex // protects the buckets map during eviction sweep
-	buckets   sync.Map   // map[string]*rateLimiter
+	buckets   sync.Map // map[string]*rateLimiter
 	perSecond int
 }
 
