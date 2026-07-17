@@ -22,6 +22,8 @@ jobs:
         run: go vet ./...
       - name: Test (race)
         run: go test -race -coverprofile=coverage.txt -covermode=atomic ./... || go test -race ./...
+        env:
+          GOFLAGS: -mod=mod
       - name: Benchmarks (smoke)
         run: go test -bench=. -benchtime=1x -run=^$ ./internal/detector/
       - name: Upload coverage
@@ -43,8 +45,10 @@ jobs:
         run: go mod download
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.62
+          version: v1.59
           args: --timeout=5m
+        env:
+          GOFLAGS: -mod=mod
 
   security:
     name: Security Scan

@@ -1,6 +1,7 @@
 run:
   timeout: 5m
   tests: true
+  go: "1.22"
 
 linters:
   enable:
@@ -11,9 +12,6 @@ linters:
     - unused
     - gofmt
     - goimports
-  disable:
-    - typecheck
-    - depguard
 
 linters-settings:
   errcheck:
@@ -31,11 +29,5 @@ issues:
     - path: cmd/
       linters:
         - errcheck
-    - path: internal/storage/redis\.go
-      linters:
-        - typecheck
-    - path: internal/kafka/kafka\.go
-      linters:
-        - typecheck
   max-issues-per-linter: 0
   max-same-issues: 0
